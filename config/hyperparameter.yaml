@@ -1,0 +1,30 @@
+data:
+  events_dir: data/raw/events
+  labels_dir: data/raw/labels
+
+training:
+  shuffle: true
+
+model:
+  model_type: lstm # lstm, transformer, mamba
+  input_dim: 4
+  output_dim: 3
+
+models:
+  lstm:
+    batch_size: 16
+    epochs: 10
+    hidden_dim: 128
+    learning_rate: 0.001
+
+  transformer:
+    batch_size: 16
+    epochs: 10
+    hidden_dim: 128
+    learning_rate: 0.001
+
+  mamba:
+    batch_size: 16
+    epochs: 10
+    hidden_dim: 128
+    learning_rate: 0.0001

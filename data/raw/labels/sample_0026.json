@@ -1,0 +1,11 @@
+{
+  "sample_id": "sample_dummy_0026",
+  "text": "random\n",
+  "bitstream": "1001001011000111100110011000111000011100010111000010010100001110",
+  "num_transmissions": 7,
+  "protocol": {
+    "has_start_bit": true,
+    "has_end_bit": true,
+    "data_bits": 64
+  }
+}
