@@ -1,9 +1,36 @@
 data:
-  events_dir: data/raw/events
-  labels_dir: data/raw/labels
+  dataset_root: data/Dataset_label
+  processed_manifest: data/dataset_processed/manifest.json
+  target_bit_length: 70
+  use_filtered: true
+
+
+  excluded_datastrings:
+    - datastring_1
+    - datastring_11
+    - datastring_42
+    - datastring_52
+    - datastring_57
+    - datastring_62
+    - datastring_66
+    - datastring_67
+    - datastring_68
+    - datastring_71
+  # Keep explicit sample-level excludes for known bad edge cases.
+  excluded_samples:
+    - seq_000001_datastring_1_chunk_001_sample_000001
+    - seq_000062_datastring_62_chunk_002_sample_000262
+    - seq_000067_datastring_67_chunk_002_sample_000289
 
 training:
   shuffle: true
+  num_workers: 0
+  log_dir: outputs/logs
+
+split:
+  seed: 42
+  train_ratio: 0.90
+  val_ratio: 0.10
 
 model:
   model_type: lstm # lstm, transformer, mamba
@@ -12,19 +39,34 @@ model:
 
 models:
   lstm:
-    batch_size: 16
-    epochs: 10
-    hidden_dim: 128
-    learning_rate: 0.001
+    batch_size: 32
+    epochs: 50
+    hidden_dim: 254
+    num_layers: 2
+    bidirectional: true
+    dropout: 0.1
+    learning_rate: 0.0001
+    weight_decay: 0.000
+    grad_clip: 1.0
 
   transformer:
-    batch_size: 16
+    batch_size: 32
     epochs: 10
     hidden_dim: 128
-    learning_rate: 0.001
+    num_layers: 2
+    nhead: 4
+    ff_dim: 512
+    dropout: 0.1
+    use_positional_encoding: true
+    learning_rate: 0.0003
 
   mamba:
     batch_size: 16
-    epochs: 10
+    epochs: 100
     hidden_dim: 128
+    num_layers: 2
+    d_state: 16
+    d_conv: 4
+    expand: 2
+    dropout: 0.1
     learning_rate: 0.0001
