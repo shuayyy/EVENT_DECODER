@@ -11,10 +11,12 @@ from datasets.formats import EVENT_DTYPE
 DEFAULT_CONFIG_PATH = Path("config/hyperparameter.yaml")
 DEFAULT_OUTPUT_ROOT = Path("data/dataset_processed")
 FEATURE_NAMES = [
-    "pos_count",
-    "neg_count",
-    "duration_norm",
-    "std_time_norm",
+    "log_pos",
+    "log_neg",
+    "log_total",
+    "polarity_ratio",
+    "delta_log_total",
+    "delta_polarity_ratio",
 ]
 
 
@@ -37,7 +39,7 @@ def parse_args():
     parser.add_argument(
         "--num-bins",
         type=int,
-        default=500,
+        default=1750,
         help="Number of equal-time bins per repetition.",
     )
     parser.add_argument(
@@ -82,68 +84,47 @@ def get_ordered_repetition_windows(chunk_info):
 def summarize_repetition(rep_events, start_ns, end_ns, num_bins):
     features = np.zeros((num_bins, len(FEATURE_NAMES)), dtype=np.float32)
 
-    if rep_events.size == 0:
-        return features
-
     total_duration_ns = end_ns - start_ns
     if total_duration_ns <= 0:
         return features
 
-    times_ns = rep_events["witnessed_utc_ns"].astype(np.float64)
-    times_norm = (times_ns - start_ns) / total_duration_ns
-    times_norm = np.clip(times_norm, 0.0, 1.0)
+    pos_counts = np.zeros(num_bins, dtype=np.float32)
+    neg_counts = np.zeros(num_bins, dtype=np.float32)
 
-    bin_indices = np.minimum(
-        (times_norm * num_bins).astype(np.int64),
-        num_bins - 1,
-    )
-    polarity = rep_events["polarity"].astype(np.int64)
+    if rep_events.size != 0:
+        elapsed_ns = rep_events["witnessed_utc_ns"].astype(np.int64) - int(start_ns)
+        bin_indices = np.floor_divide(
+            elapsed_ns * num_bins,
+            total_duration_ns,
+        )
+        bin_indices = np.clip(bin_indices, 0, num_bins - 1)
+        polarity = rep_events["polarity"].astype(np.int64)
 
-    pos_counts = np.bincount(
-        bin_indices[polarity == 1],
-        minlength=num_bins,
-    ).astype(np.float32)
-    neg_counts = np.bincount(
-        bin_indices[polarity != 1],
-        minlength=num_bins,
-    ).astype(np.float32)
+        pos_counts = np.bincount(
+            bin_indices[polarity == 1],
+            minlength=num_bins,
+        ).astype(np.float32)
+        neg_counts = np.bincount(
+            bin_indices[polarity != 1],
+            minlength=num_bins,
+        ).astype(np.float32)
 
-    total_counts = np.bincount(bin_indices, minlength=num_bins).astype(np.int64)
-    sum_t = np.bincount(bin_indices, weights=times_norm, minlength=num_bins)
-    sum_t2 = np.bincount(
-        bin_indices,
-        weights=times_norm * times_norm,
-        minlength=num_bins,
-    )
+    log_pos = np.log1p(pos_counts)
+    log_neg = np.log1p(neg_counts)
+    total_counts = pos_counts + neg_counts
+    log_total = np.log1p(total_counts)
+    polarity_ratio = (pos_counts - neg_counts) / (total_counts + 1e-6)
+    delta_log_total = np.zeros_like(log_total)
+    delta_polarity_ratio = np.zeros_like(polarity_ratio)
+    delta_log_total[1:] = log_total[1:] - log_total[:-1]
+    delta_polarity_ratio[1:] = polarity_ratio[1:] - polarity_ratio[:-1]
 
-    duration_norm = np.zeros(num_bins, dtype=np.float32)
-    std_time_norm = np.zeros(num_bins, dtype=np.float32)
-
-    nonzero = total_counts > 0
-    mean_t = np.zeros(num_bins, dtype=np.float64)
-    mean_t[nonzero] = sum_t[nonzero] / total_counts[nonzero]
-    variance = np.zeros(num_bins, dtype=np.float64)
-    variance[nonzero] = (
-        sum_t2[nonzero] / total_counts[nonzero]
-    ) - (mean_t[nonzero] ** 2)
-    variance = np.maximum(variance, 0.0)
-    std_time_norm[nonzero] = np.sqrt(variance[nonzero]).astype(np.float32)
-
-    # Event timestamps are already in chronological order, so bin indices are
-    # non-decreasing after equal-time binning. Use that to find the first and
-    # last normalized time in each occupied bin without a Python loop.
-    change_points = np.flatnonzero(np.diff(bin_indices)) + 1
-    starts = np.concatenate(([0], change_points))
-    ends = np.concatenate((change_points - 1, [bin_indices.size - 1]))
-    occupied_bins = bin_indices[starts]
-    duration_norm[occupied_bins] = (
-        times_norm[ends] - times_norm[starts]
-    ).astype(np.float32)
-
-    features[:, 0] = pos_counts
-    features[:, 1] = neg_counts
-    features[:, 2] = duration_norm
-    features[:, 3] = std_time_norm
+    features[:, 0] = log_pos
+    features[:, 1] = log_neg
+    features[:, 2] = log_total
+    features[:, 3] = polarity_ratio
+    features[:, 4] = delta_log_total
+    features[:, 5] = delta_polarity_ratio
 
     return features
 

@@ -2,6 +2,9 @@ data:
   dataset_root: data/Dataset_label
   processed_manifest: data/dataset_processed/manifest.json
   target_bit_length: 70
+  include_start_end_bits: true
+  start_flag: "1101"
+  end_flag: "1011"
   use_filtered: true
 
 
@@ -23,9 +26,18 @@ data:
     - seq_000067_datastring_67_chunk_002_sample_000289
 
 training:
+  task: fixed_bits # fixed_bits, ctc
   shuffle: true
   num_workers: 0
   log_dir: outputs/logs
+
+ctc_decode:
+  method: beam # greedy, beam
+  beam_width: 25
+  target_bit_length: 70
+  length_penalty: 2.0
+  exact_length_preferred: true
+  use_repetition_voting: true
 
 split:
   seed: 42
@@ -33,8 +45,8 @@ split:
   val_ratio: 0.10
 
 model:
-  model_type: lstm # lstm, transformer, mamba
-  input_dim: 4
+  model_type: mamba # lstm, transformer, mamba
+  input_dim: 6
   output_dim: 3
 
 models:
@@ -42,26 +54,26 @@ models:
     batch_size: 32
     epochs: 50
     hidden_dim: 254
-    num_layers: 2
+    num_layers: 4
     bidirectional: true
-    dropout: 0.1
-    learning_rate: 0.0001
+    dropout: 0.0
+    learning_rate: 0.00005
     weight_decay: 0.000
     grad_clip: 1.0
 
   transformer:
     batch_size: 32
-    epochs: 10
-    hidden_dim: 128
-    num_layers: 2
-    nhead: 4
-    ff_dim: 512
-    dropout: 0.1
+    epochs: 100
+    hidden_dim: 256
+    num_layers: 4
+    nhead: 8
+    ff_dim: 1024
+    dropout: 0.05
     use_positional_encoding: true
-    learning_rate: 0.0003
+    learning_rate: 0.0001
 
   mamba:
-    batch_size: 16
+    batch_size: 32
     epochs: 100
     hidden_dim: 128
     num_layers: 2

@@ -1,5 +1,6 @@
 import random
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -7,9 +8,22 @@ import torch.nn as nn
 import yaml
 from torch.utils.data import DataLoader
 
-from datasets.collate import ctc_collate
+from datasets.collate import ctc_collate, fixed_bits_collate
 from datasets.dataset import ProcessedRepetitionDataset
 from datasets.tokenizer import Tokenizer
+from losses.ctc import (
+    compute_sequence_metrics,
+    ctc_prefix_beam_search_decode,
+    ctc_loss,
+    greedy_ctc_decode,
+    recover_target_strings,
+)
+from losses.fixed_bits import (
+    bits_to_strings,
+    compute_fixed_bits_metrics,
+    decode_fixed_bits,
+    fixed_bits_loss,
+)
 from model.model import LSTMdecoder, MambaDecoder, TransformerDecoder
 
 
@@ -21,6 +35,10 @@ def load_config():
         return yaml.safe_load(handle)
 
 
+def select_training_inputs(inputs):
+    return inputs
+
+
 def resolve_model_config(config):
     shared_model_config = dict(config["model"])
     model_type = shared_model_config["model_type"].strip().lower()
@@ -28,7 +46,7 @@ def resolve_model_config(config):
     return model_type, {**shared_model_config, **per_model_config}
 
 
-def build_model(model_type, model_config):
+def build_model(model_type, model_config, output_mode="ctc", target_bit_length=70):
     if model_type == "lstm":
         return LSTMdecoder(
             input_dim=model_config["input_dim"],
@@ -37,6 +55,8 @@ def build_model(model_type, model_config):
             num_layers=model_config.get("num_layers", 1),
             bidirectional=model_config.get("bidirectional", False),
             dropout=model_config.get("dropout", 0.0),
+            output_mode=output_mode,
+            target_bit_length=target_bit_length,
         )
     if model_type == "transformer":
         return TransformerDecoder(
@@ -49,6 +69,8 @@ def build_model(model_type, model_config):
             dropout=model_config.get("dropout", 0.0),
             use_positional_encoding=model_config.get("use_positional_encoding", True),
             max_len=model_config.get("max_len", 5000),
+            output_mode=output_mode,
+            target_bit_length=target_bit_length,
         )
     if model_type == "mamba":
         return MambaDecoder(
@@ -60,6 +82,8 @@ def build_model(model_type, model_config):
             d_conv=model_config.get("d_conv", 4),
             expand=model_config.get("expand", 2),
             dropout=model_config.get("dropout", 0.0),
+            output_mode=output_mode,
+            target_bit_length=target_bit_length,
         )
 
     else:
@@ -96,138 +120,204 @@ def split_sequences(samples, split_config):
     }
 
 
-def recover_target_strings(targets, target_lengths, tokenizer):
-    target_strings = []
-    offset = 0
-
-    for length in target_lengths.tolist():
-        target_slice = targets[offset : offset + length].tolist()
-        target_strings.append(tokenizer.decode(target_slice))
-        offset += length
-
-    return target_strings
-
-
-def greedy_ctc_decode(logits, tokenizer):
-    predicted_ids = logits.argmax(dim=-1).detach().cpu()
-    decoded_predictions = []
-
-    for row in predicted_ids.tolist():
-        collapsed_tokens = []
-        previous_token = None
-
-        for token_id in row:
-            if token_id != previous_token:
-                collapsed_tokens.append(token_id)
-            previous_token = token_id
-
-        bit_string = "".join(
-            "0" if token_id == tokenizer.zero_id
-            else "1" if token_id == tokenizer.one_id
-            else ""
-            for token_id in collapsed_tokens
-            if token_id != tokenizer.blank_id
+def decode_ctc_predictions(logits, tokenizer, decode_config):
+    method = decode_config.get("method", "greedy").strip().lower()
+    if method == "greedy":
+        return greedy_ctc_decode(logits, tokenizer)
+    if method == "beam":
+        return ctc_prefix_beam_search_decode(
+            logits,
+            tokenizer,
+            beam_width=int(decode_config.get("beam_width", 25)),
+            target_bit_length=int(decode_config["target_bit_length"]),
+            length_penalty=float(decode_config.get("length_penalty", 2.0)),
+            exact_length_preferred=bool(
+                decode_config.get("exact_length_preferred", True)
+            ),
         )
-        decoded_predictions.append(bit_string)
-
-    return decoded_predictions
+    raise ValueError(f"Unsupported ctc_decode.method: {method}")
 
 
-def compute_sequence_metrics(predictions, targets, target_bit_length):
-    exact_matches = 0
-    matching_bits = 0
-    total_target_bits = 0
+def compute_voted_chunk_metrics(predictions, targets, metadata, target_bit_length):
+    grouped = {}
+    for prediction, target, sample_metadata in zip(predictions, targets, metadata):
+        group_id = sample_metadata["vote_group_id"]
+        if group_id not in grouped:
+            grouped[group_id] = {
+                "target": target,
+                "votes": [[0, 0] for _ in range(target_bit_length)],
+            }
+        for bit_index, bit in enumerate(prediction[:target_bit_length]):
+            if bit == "0":
+                grouped[group_id]["votes"][bit_index][0] += 1
+            elif bit == "1":
+                grouped[group_id]["votes"][bit_index][1] += 1
 
-    for prediction, target in zip(predictions, targets):
-        exact_matches += int(prediction == target)
+    voted_predictions = []
+    voted_targets = []
+    for group in grouped.values():
+        voted_bits = []
+        for zero_votes, one_votes in group["votes"]:
+            if zero_votes == 0 and one_votes == 0:
+                continue
+            voted_bits.append("1" if one_votes > zero_votes else "0")
+        voted_predictions.append("".join(voted_bits))
+        voted_targets.append(group["target"])
 
-        compare_length = min(len(prediction), target_bit_length)
-        overlap_matches = sum(
-            pred_bit == target_bit
-            for pred_bit, target_bit in zip(
-                prediction[:compare_length],
-                target[:compare_length],
-            )
-        )
-        overlap_wrong = compare_length - overlap_matches
-        length_penalty = abs(len(prediction) - target_bit_length)
-        total_wrong_bits = overlap_wrong + length_penalty
-        correct_bits = max(target_bit_length - total_wrong_bits, 0)
-
-        matching_bits += correct_bits
-        total_target_bits += target_bit_length
-
-    return exact_matches, matching_bits, total_target_bits
-
+    exact_matches, matching_bits, total_target_bits = compute_sequence_metrics(
+        voted_predictions,
+        voted_targets,
+        target_bit_length,
+    )
+    total_groups = max(len(voted_targets), 1)
+    return {
+        "voted_chunk_bit_accuracy": matching_bits / max(total_target_bits, 1),
+        "voted_chunk_exact_accuracy": exact_matches / total_groups,
+        "voted_chunk_count": len(voted_targets),
+    }
 
 def evaluate(
     model,
     loader,
     criterion,
     device,
-    tokenizer,
+    task,
     target_bit_length,
+    tokenizer=None,
     debug_first_batch=False,
     debug_logger=None,
+    ctc_decode_config=None,
 ):
     model.eval()
     total_loss = 0.0
     exact_matches = 0
     matching_bits = 0
     total_target_bits = 0
+    total_prediction_length = 0
+    total_reference_length = 0
+    total_predictions = 0
+    ctc_predictions_for_voting = []
+    ctc_references_for_voting = []
+    ctc_metadata_for_voting = []
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
-            inputs, targets, input_lengths, target_lengths = [
-                tensor.to(device) for tensor in batch
-            ]
+            if task == "ctc":
+                if len(batch) == 5:
+                    inputs, targets, input_lengths, target_lengths = [
+                        tensor.to(device) for tensor in batch[:4]
+                    ]
+                    batch_metadata = batch[4]
+                else:
+                    inputs, targets, input_lengths, target_lengths = [
+                        tensor.to(device) for tensor in batch
+                    ]
+                    batch_metadata = None
+            elif task == "fixed_bits":
+                if len(batch) == 4:
+                    inputs, targets, input_lengths = [
+                        tensor.to(device) for tensor in batch[:3]
+                    ]
+                else:
+                    inputs, targets, input_lengths = [
+                        tensor.to(device) for tensor in batch
+                    ]
+                if targets.shape[1] != target_bit_length:
+                    raise AssertionError(
+                        f"fixed_bits mode expects target length {target_bit_length}, "
+                        f"got {targets.shape[1]}"
+                    )
+            else:
+                raise ValueError(f"Unsupported training task: {task}")
+
+            inputs = select_training_inputs(inputs)
 
             logits = model(inputs, input_lengths)
-            log_probs = nn.functional.log_softmax(logits, dim=-1).permute(1, 0, 2)
-
-            loss = criterion(
-                log_probs,
-                targets,
-                input_lengths,
-                target_lengths,
-            )
-            total_loss += loss.item()
-
-            predictions = greedy_ctc_decode(logits, tokenizer)
-            references = recover_target_strings(
-                targets.detach().cpu(),
-                target_lengths.detach().cpu(),
-                tokenizer,
-            )
-            batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
-                compute_sequence_metrics(
-                    predictions,
-                    references,
-                    target_bit_length,
+            if task == "ctc":
+                loss = ctc_loss(
+                    logits,
+                    targets,
+                    input_lengths,
+                    target_lengths,
+                    criterion,
                 )
-            )
+                predictions = decode_ctc_predictions(
+                    logits,
+                    tokenizer,
+                    ctc_decode_config or {},
+                )
+                references = recover_target_strings(
+                    targets.detach().cpu(),
+                    target_lengths.detach().cpu(),
+                    tokenizer,
+                )
+                batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
+                    compute_sequence_metrics(
+                        predictions,
+                        references,
+                        target_bit_length,
+                    )
+                )
+                total_prediction_length += sum(len(pred) for pred in predictions)
+                total_reference_length += sum(len(ref) for ref in references)
+                total_predictions += len(predictions)
+                if batch_metadata is not None:
+                    ctc_predictions_for_voting.extend(predictions)
+                    ctc_references_for_voting.extend(references)
+                    ctc_metadata_for_voting.extend(batch_metadata)
+            else:
+                loss = fixed_bits_loss(logits, targets, criterion)
+                predicted_bits = decode_fixed_bits(logits)
+                references_bits = targets.detach().cpu()
+                batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
+                    compute_fixed_bits_metrics(
+                        predicted_bits,
+                        references_bits,
+                        target_bit_length,
+                    )
+                )
+                predictions = bits_to_strings(predicted_bits)
+                references = bits_to_strings(references_bits)
+
+            total_loss += loss.item()
             exact_matches += batch_exact_matches
             matching_bits += batch_matching_bits
             total_target_bits += batch_total_target_bits
 
             if debug_first_batch and batch_index == 0 and predictions:
-                debug_message = (
-                    "Validation debug: "
-                    f"target={references[0]} "
-                    f"pred={predictions[0]} "
-                    f"pred_len={len(predictions[0])} "
-                    f"target_len={len(references[0])}"
-                )
-                if debug_logger is not None:
-                    debug_logger(debug_message)
-                else:
-                    print(debug_message)
+                for example_index in range(min(3, len(predictions))):
+                    debug_message = (
+                        "Validation debug: "
+                        f"target={references[example_index]} "
+                        f"pred={predictions[example_index]} "
+                        f"pred_len={len(predictions[example_index])} "
+                        f"target_len={len(references[example_index])}"
+                    )
+                    if debug_logger is not None:
+                        debug_logger(debug_message)
+                    else:
+                        print(debug_message)
 
-    return {
+    metrics = {
         "loss": total_loss / max(len(loader), 1),
         "bit_accuracy": matching_bits / max(total_target_bits, 1),
         "exact_accuracy": exact_matches / max(len(loader.dataset), 1),
+        "avg_pred_length": total_prediction_length / max(total_predictions, 1),
+        "avg_target_length": total_reference_length / max(total_predictions, 1),
     }
+    if task == "ctc" and ctc_predictions_for_voting and ctc_decode_config and ctc_decode_config.get(
+        "use_repetition_voting",
+        False,
+    ):
+        metrics.update(
+            compute_voted_chunk_metrics(
+                ctc_predictions_for_voting,
+                ctc_references_for_voting,
+                ctc_metadata_for_voting,
+                target_bit_length,
+            )
+        )
+    return metrics
 
 
 def write_log_file(log_path, log_lines):
@@ -237,7 +327,38 @@ def write_log_file(log_path, log_lines):
 
 def train():
     config = load_config()
+    task = config["training"].get("task", "ctc").strip().lower()
     model_type, model_config = resolve_model_config(config)
+    ctc_decode_config = dict(config.get("ctc_decode", {}))
+    base_target_bit_length = int(config["data"]["target_bit_length"])
+    include_start_end_bits = config["data"].get("include_start_end_bits", False)
+    start_flag = config["data"].get("start_flag", "")
+    end_flag = config["data"].get("end_flag", "")
+    target_bit_length = base_target_bit_length
+    if include_start_end_bits:
+        target_bit_length += len(start_flag) + len(end_flag)
+    ctc_target_bit_length = int(
+        ctc_decode_config.get("target_bit_length", base_target_bit_length)
+    )
+    if include_start_end_bits:
+        ctc_target_bit_length += len(start_flag) + len(end_flag)
+    ctc_decode_config["target_bit_length"] = ctc_target_bit_length
+    if task == "ctc":
+        collate_fn = ctc_collate
+        output_mode = "ctc"
+        model_config["output_dim"] = 3
+        criterion = nn.CTCLoss(blank=0, zero_infinity=True)
+    elif task == "fixed_bits":
+        collate_fn = partial(
+            fixed_bits_collate,
+            target_bit_length=target_bit_length,
+        )
+        output_mode = "fixed_bits"
+        model_config["output_dim"] = 2
+        criterion = nn.CrossEntropyLoss()
+    else:
+        raise ValueError(f"Unsupported training task: {task}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     validate_model_runtime(model_config, device)
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -245,7 +366,6 @@ def train():
     log_path = log_dir / f"{run_timestamp}_{model_type}.txt"
     log_lines = []
     tokenizer = Tokenizer()
-    target_bit_length = int(config["data"]["target_bit_length"])
 
     def log(message):
         print(message)
@@ -258,36 +378,53 @@ def train():
                 "data/dataset_processed/manifest.json",
             )
         )
-        dataset = ProcessedRepetitionDataset(manifest_path=manifest_path)
+        dataset = ProcessedRepetitionDataset(
+            manifest_path=manifest_path,
+            include_start_end_bits=include_start_end_bits,
+            start_flag=start_flag,
+            end_flag=end_flag,
+        )
         split_map = split_sequences(dataset.samples, config["split"])
 
         train_dataset = ProcessedRepetitionDataset(
             manifest_path=manifest_path,
             sequences=split_map["train"],
+            include_start_end_bits=include_start_end_bits,
+            start_flag=start_flag,
+            end_flag=end_flag,
         )
         val_dataset = ProcessedRepetitionDataset(
             manifest_path=manifest_path,
             sequences=split_map["val"],
+            include_start_end_bits=include_start_end_bits,
+            start_flag=start_flag,
+            end_flag=end_flag,
+            return_metadata=task == "ctc"
+            and ctc_decode_config.get("use_repetition_voting", False),
         )
 
         train_loader = DataLoader(
             train_dataset,
             batch_size=model_config["batch_size"],
             shuffle=config["training"]["shuffle"],
-            collate_fn=ctc_collate,
+            collate_fn=collate_fn,
             num_workers=config["training"].get("num_workers", 0),
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=model_config["batch_size"],
             shuffle=False,
-            collate_fn=ctc_collate,
+            collate_fn=collate_fn,
             num_workers=config["training"].get("num_workers", 0),
         )
 
-        model = build_model(model_type, model_config).to(device)
+        model = build_model(
+            model_type,
+            model_config,
+            output_mode=output_mode,
+            target_bit_length=target_bit_length,
+        ).to(device)
 
-        criterion = nn.CTCLoss(blank=0, zero_infinity=True)
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=model_config["learning_rate"],
@@ -296,9 +433,21 @@ def train():
 
         log(f"Run timestamp: {run_timestamp}")
         log(f"Using processed manifest: {manifest_path}")
+        log(f"Task: {task}")
         log(f"Model type: {model_type}")
         log(f"Device: {device}")
         log(f"Model config: {model_config}")
+        log(
+            "Ground truth config: "
+            f"base_target_bit_length={base_target_bit_length}, "
+            f"include_start_end_bits={include_start_end_bits}, "
+            f"effective_target_bit_length={target_bit_length}"
+        )
+        if task == "ctc":
+            # CTC training is unchanged; beam search and voting only affect decoding/evaluation.
+            # Length preference is used because the current target length is fixed per run.
+            # Repetition voting is used because the same transmitted chunk appears multiple times.
+            log(f"CTC decode config: {ctc_decode_config}")
         log(
             "Split summary: "
             f"train={{sequences: {len(split_map['train'])}, samples: {len(train_dataset)}}}, "
@@ -316,23 +465,37 @@ def train():
             total_target_bits = 0
 
             for batch in train_loader:
-                inputs, targets, input_lengths, target_lengths = batch
-                inputs, targets, input_lengths, target_lengths = [
-                    b.to(device)
-                    for b in (inputs, targets, input_lengths, target_lengths)
-                ]
+                if task == "ctc":
+                    inputs, targets, input_lengths, target_lengths = batch
+                    inputs, targets, input_lengths, target_lengths = [
+                        b.to(device)
+                        for b in (inputs, targets, input_lengths, target_lengths)
+                    ]
+                else:
+                    inputs, targets, input_lengths = batch
+                    inputs, targets, input_lengths = [
+                        b.to(device)
+                        for b in (inputs, targets, input_lengths)
+                    ]
+                    if targets.shape[1] != target_bit_length:
+                        raise AssertionError(
+                            f"fixed_bits mode expects target length {target_bit_length}, "
+                            f"got {targets.shape[1]}"
+                        )
+
+                inputs = select_training_inputs(inputs)
 
                 logits = model(inputs, input_lengths)
-                log_probs = nn.functional.log_softmax(logits, dim=-1)
-
-                log_probs = log_probs.permute(1, 0, 2)
-
-                loss = criterion(
-                    log_probs,
-                    targets,
-                    input_lengths,
-                    target_lengths,
-                )
+                if task == "ctc":
+                    loss = ctc_loss(
+                        logits,
+                        targets,
+                        input_lengths,
+                        target_lengths,
+                        criterion,
+                    )
+                else:
+                    loss = fixed_bits_loss(logits, targets, criterion)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -341,19 +504,30 @@ def train():
                 optimizer.step()
 
                 total_loss += loss.item()
-                predictions = greedy_ctc_decode(logits, tokenizer)
-                references = recover_target_strings(
-                    targets.detach().cpu(),
-                    target_lengths.detach().cpu(),
-                    tokenizer,
-                )
-                batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
-                    compute_sequence_metrics(
-                        predictions,
-                        references,
-                        target_bit_length,
+                if task == "ctc":
+                    predictions = greedy_ctc_decode(logits, tokenizer)
+                    references = recover_target_strings(
+                        targets.detach().cpu(),
+                        target_lengths.detach().cpu(),
+                        tokenizer,
                     )
-                )
+                    batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
+                        compute_sequence_metrics(
+                            predictions,
+                            references,
+                            target_bit_length,
+                        )
+                    )
+                else:
+                    predicted_bits = decode_fixed_bits(logits)
+                    references_bits = targets.detach().cpu()
+                    batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
+                        compute_fixed_bits_metrics(
+                            predicted_bits,
+                            references_bits,
+                            target_bit_length,
+                        )
+                    )
                 exact_matches += batch_exact_matches
                 matching_bits += batch_matching_bits
                 total_target_bits += batch_total_target_bits
@@ -366,12 +540,14 @@ def train():
                 val_loader,
                 criterion,
                 device,
-                tokenizer,
+                task,
                 target_bit_length,
+                tokenizer=tokenizer if task == "ctc" else None,
                 debug_first_batch=debug_first_val_batch,
                 debug_logger=log,
+                ctc_decode_config=ctc_decode_config if task == "ctc" else None,
             )
-            log(
+            epoch_log = (
                 f"Epoch {epoch + 1}: "
                 f"train_loss = {train_loss:.4f}, "
                 f"train_bit_accuracy = {train_bit_accuracy:.4f}, "
@@ -380,6 +556,19 @@ def train():
                 f"val_bit_accuracy = {val_metrics['bit_accuracy']:.4f}, "
                 f"val_exact_accuracy = {val_metrics['exact_accuracy']:.4f}"
             )
+            if task == "ctc":
+                epoch_log += (
+                    f", per_repetition_val_bit_accuracy = {val_metrics['bit_accuracy']:.4f}, "
+                    f"per_repetition_val_exact_accuracy = {val_metrics['exact_accuracy']:.4f}, "
+                    f"val_avg_pred_len = {val_metrics['avg_pred_length']:.2f}, "
+                    f"val_avg_target_len = {val_metrics['avg_target_length']:.2f}"
+                )
+                if "voted_chunk_bit_accuracy" in val_metrics:
+                    epoch_log += (
+                        f", voted_chunk_val_bit_accuracy = {val_metrics['voted_chunk_bit_accuracy']:.4f}, "
+                        f"voted_chunk_val_exact_accuracy = {val_metrics['voted_chunk_exact_accuracy']:.4f}"
+                    )
+            log(epoch_log)
     except Exception as exc:
         log(f"Training failed: {type(exc).__name__}: {exc}")
         raise

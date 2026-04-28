@@ -24,6 +24,12 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+def pool_sequence_for_fixed_bits(hidden_states, output_mode, sequence_pool):
+    if output_mode != "fixed_bits":
+        return hidden_states
+    return sequence_pool(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+
 class LSTMdecoder(nn.Module):
     def __init__(
         self,
@@ -33,8 +39,16 @@ class LSTMdecoder(nn.Module):
         num_layers=1,
         bidirectional=False,
         dropout=0.0,
+        output_mode="ctc",
+        target_bit_length=70,
     ):
         super().__init__()
+        self.output_mode = output_mode
+        self.sequence_pool = (
+            nn.AdaptiveAvgPool1d(target_bit_length)
+            if output_mode == "fixed_bits"
+            else None
+        )
 
         self.encoder = nn.Linear(input_dim, hidden_dim)
 
@@ -54,6 +68,11 @@ class LSTMdecoder(nn.Module):
         x = self.encoder(x)
         # `_` means ignore the LSTM hidden and cell states, since nn.LSTM returns `output, (hidden_state, cell_state)`.
         x, _ = self.temporal_model(x)
+        x = pool_sequence_for_fixed_bits(
+            x,
+            self.output_mode,
+            self.sequence_pool,
+        )
         x = self.decoder(x)
 
         return x
@@ -69,8 +88,16 @@ class MambaDecoder(nn.Module):
         d_conv=4,
         expand=2,
         dropout=0.0,
+        output_mode="ctc",
+        target_bit_length=70,
     ):
         super().__init__()
+        self.output_mode = output_mode
+        self.sequence_pool = (
+            nn.AdaptiveAvgPool1d(target_bit_length)
+            if output_mode == "fixed_bits"
+            else None
+        )
 
         self.encoder = nn.Linear(input_dim, hidden_dim)
         self.temporal_layers = nn.ModuleList(
@@ -99,6 +126,11 @@ class MambaDecoder(nn.Module):
             x = layer(layer_norm(x))
             x = residual + self.dropout(x)
         x = self.output_norm(x)
+        x = pool_sequence_for_fixed_bits(
+            x,
+            self.output_mode,
+            self.sequence_pool,
+        )
         x = self.decoder(x)
 
         return x
@@ -116,8 +148,16 @@ class TransformerDecoder(nn.Module):
         dropout=0.0,
         use_positional_encoding=True,
         max_len=5000,
+        output_mode="ctc",
+        target_bit_length=70,
     ):
         super().__init__()
+        self.output_mode = output_mode
+        self.sequence_pool = (
+            nn.AdaptiveAvgPool1d(target_bit_length)
+            if output_mode == "fixed_bits"
+            else None
+        )
 
         self.encoder = nn.Linear(input_dim, hidden_dim)
         self.positional_encoding = (
@@ -141,20 +181,12 @@ class TransformerDecoder(nn.Module):
     def forward(self, x, input_lengths=None):
         x = self.encoder(x)
         x = self.positional_encoding(x)
+        x = self.temporal_model(x)
 
-        if input_lengths is not None:
-            B, T, _ = x.shape
-            padding_mask = (
-                torch.arange(T, device=x.device).unsqueeze(0)
-                >= input_lengths.unsqueeze(1)
-            )
-        else:
-            padding_mask = None
-
-        x = self.temporal_model(
+        x = pool_sequence_for_fixed_bits(
             x,
-            src_key_padding_mask=padding_mask,
+            self.output_mode,
+            self.sequence_pool,
         )
-
         x = self.decoder(x)
         return x
