@@ -45,8 +45,8 @@ split:
   val_ratio: 0.10
 
 model:
-  model_type: mamba # lstm, transformer, mamba
-  input_dim: 6
+  model_type: transformer # lstm, transformer, mamba
+  input_dim: 13
   output_dim: 3
 
 models:
@@ -75,10 +75,10 @@ models:
   mamba:
     batch_size: 32
     epochs: 100
-    hidden_dim: 128
-    num_layers: 2
-    d_state: 16
-    d_conv: 4
+    hidden_dim: 256
+    num_layers: 4
+    d_state: 64
+    d_conv: 16
     expand: 2
-    dropout: 0.1
-    learning_rate: 0.0001
+    dropout: 0.0
+    learning_rate: 0.0003

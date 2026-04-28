@@ -25,9 +25,11 @@ from losses.fixed_bits import (
     fixed_bits_loss,
 )
 from model.model import LSTMdecoder, MambaDecoder, TransformerDecoder
+from log import TrainingLogger, format_epoch_log
 
 
 CONFIG_PATH = Path("config/hyperparameter.yaml")
+PAD_COUNT_BIT_LENGTH = 6
 
 
 def load_config():
@@ -120,6 +122,83 @@ def split_sequences(samples, split_config):
     }
 
 
+def init_segment_metric_counts():
+    return {
+        "start_matches": 0,
+        "start_total": 0,
+        "end_matches": 0,
+        "end_total": 0,
+        "data_matches": 0,
+        "data_total": 0,
+        "padding_matches": 0,
+        "padding_total": 0,
+    }
+
+
+def accumulate_segment_metric_counts(
+    counts,
+    predictions,
+    targets,
+    base_target_bit_length,
+    include_start_end_bits,
+    start_flag,
+    end_flag,
+):
+    payload_bit_length = base_target_bit_length - PAD_COUNT_BIT_LENGTH
+    start_length = len(start_flag) if include_start_end_bits else 0
+    end_length = len(end_flag) if include_start_end_bits else 0
+    body_offset = start_length
+
+    for prediction, target in zip(predictions, targets):
+        if include_start_end_bits:
+            for index in range(start_length):
+                pred_bit = prediction[index] if index < len(prediction) else None
+                if pred_bit == target[index]:
+                    counts["start_matches"] += 1
+                counts["start_total"] += 1
+
+        pad_count_start = body_offset + payload_bit_length
+        pad_count_end = pad_count_start + PAD_COUNT_BIT_LENGTH
+        pad_count_bits = target[pad_count_start:pad_count_end]
+        pad_count = int(pad_count_bits, 2)
+        real_data_length = max(0, min(payload_bit_length, payload_bit_length - pad_count))
+
+        for index in range(body_offset, body_offset + real_data_length):
+            pred_bit = prediction[index] if index < len(prediction) else None
+            if pred_bit == target[index]:
+                counts["data_matches"] += 1
+            counts["data_total"] += 1
+
+        padding_indices = list(range(body_offset + real_data_length, body_offset + payload_bit_length))
+        padding_indices.extend(range(pad_count_start, pad_count_end))
+        for index in padding_indices:
+            pred_bit = prediction[index] if index < len(prediction) else None
+            if pred_bit == target[index]:
+                counts["padding_matches"] += 1
+            counts["padding_total"] += 1
+
+        if include_start_end_bits:
+            end_start = body_offset + base_target_bit_length
+            end_end = end_start + end_length
+            for index in range(end_start, end_end):
+                pred_bit = prediction[index] if index < len(prediction) else None
+                if pred_bit == target[index]:
+                    counts["end_matches"] += 1
+                counts["end_total"] += 1
+
+
+def finalize_segment_metric_accuracies(counts):
+    metrics = {
+        "data_accuracy": counts["data_matches"] / max(counts["data_total"], 1),
+        "padding_accuracy": counts["padding_matches"] / max(counts["padding_total"], 1),
+    }
+    if counts["start_total"] > 0:
+        metrics["start_bit_accuracy"] = counts["start_matches"] / counts["start_total"]
+    if counts["end_total"] > 0:
+        metrics["end_bit_accuracy"] = counts["end_matches"] / counts["end_total"]
+    return metrics
+
+
 def decode_ctc_predictions(logits, tokenizer, decode_config):
     method = decode_config.get("method", "greedy").strip().lower()
     if method == "greedy":
@@ -183,6 +262,10 @@ def evaluate(
     device,
     task,
     target_bit_length,
+    base_target_bit_length,
+    include_start_end_bits,
+    start_flag,
+    end_flag,
     tokenizer=None,
     debug_first_batch=False,
     debug_logger=None,
@@ -196,6 +279,7 @@ def evaluate(
     total_prediction_length = 0
     total_reference_length = 0
     total_predictions = 0
+    segment_metric_counts = init_segment_metric_counts()
     ctc_predictions_for_voting = []
     ctc_references_for_voting = []
     ctc_metadata_for_voting = []
@@ -283,6 +367,15 @@ def evaluate(
             exact_matches += batch_exact_matches
             matching_bits += batch_matching_bits
             total_target_bits += batch_total_target_bits
+            accumulate_segment_metric_counts(
+                segment_metric_counts,
+                predictions,
+                references,
+                base_target_bit_length,
+                include_start_end_bits,
+                start_flag,
+                end_flag,
+            )
 
             if debug_first_batch and batch_index == 0 and predictions:
                 for example_index in range(min(3, len(predictions))):
@@ -305,6 +398,7 @@ def evaluate(
         "avg_pred_length": total_prediction_length / max(total_predictions, 1),
         "avg_target_length": total_reference_length / max(total_predictions, 1),
     }
+    metrics.update(finalize_segment_metric_accuracies(segment_metric_counts))
     if task == "ctc" and ctc_predictions_for_voting and ctc_decode_config and ctc_decode_config.get(
         "use_repetition_voting",
         False,
@@ -318,12 +412,6 @@ def evaluate(
             )
         )
     return metrics
-
-
-def write_log_file(log_path, log_lines):
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
-
 
 def train():
     config = load_config()
@@ -364,12 +452,9 @@ def train():
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = Path(config["training"].get("log_dir", "outputs/logs"))
     log_path = log_dir / f"{run_timestamp}_{model_type}.txt"
-    log_lines = []
     tokenizer = Tokenizer()
-
-    def log(message):
-        print(message)
-        log_lines.append(message)
+    logger = TrainingLogger(log_path)
+    log = logger.log
 
     try:
         manifest_path = Path(
@@ -463,6 +548,7 @@ def train():
             exact_matches = 0
             matching_bits = 0
             total_target_bits = 0
+            train_segment_metric_counts = init_segment_metric_counts()
 
             for batch in train_loader:
                 if task == "ctc":
@@ -521,6 +607,8 @@ def train():
                 else:
                     predicted_bits = decode_fixed_bits(logits)
                     references_bits = targets.detach().cpu()
+                    predictions = bits_to_strings(predicted_bits)
+                    references = bits_to_strings(references_bits)
                     batch_exact_matches, batch_matching_bits, batch_total_target_bits = (
                         compute_fixed_bits_metrics(
                             predicted_bits,
@@ -531,10 +619,22 @@ def train():
                 exact_matches += batch_exact_matches
                 matching_bits += batch_matching_bits
                 total_target_bits += batch_total_target_bits
+                accumulate_segment_metric_counts(
+                    train_segment_metric_counts,
+                    predictions,
+                    references,
+                    base_target_bit_length,
+                    include_start_end_bits,
+                    start_flag,
+                    end_flag,
+                )
 
             train_loss = total_loss / max(len(train_loader), 1)
             train_bit_accuracy = matching_bits / max(total_target_bits, 1)
             train_exact_accuracy = exact_matches / max(len(train_loader.dataset), 1)
+            train_segment_metrics = finalize_segment_metric_accuracies(
+                train_segment_metric_counts
+            )
             val_metrics = evaluate(
                 model,
                 val_loader,
@@ -542,40 +642,32 @@ def train():
                 device,
                 task,
                 target_bit_length,
+                base_target_bit_length,
+                include_start_end_bits,
+                start_flag,
+                end_flag,
                 tokenizer=tokenizer if task == "ctc" else None,
                 debug_first_batch=debug_first_val_batch,
                 debug_logger=log,
                 ctc_decode_config=ctc_decode_config if task == "ctc" else None,
             )
-            epoch_log = (
-                f"Epoch {epoch + 1}: "
-                f"train_loss = {train_loss:.4f}, "
-                f"train_bit_accuracy = {train_bit_accuracy:.4f}, "
-                f"train_exact_accuracy = {train_exact_accuracy:.4f}, "
-                f"val_loss = {val_metrics['loss']:.4f}, "
-                f"val_bit_accuracy = {val_metrics['bit_accuracy']:.4f}, "
-                f"val_exact_accuracy = {val_metrics['exact_accuracy']:.4f}"
-            )
-            if task == "ctc":
-                epoch_log += (
-                    f", per_repetition_val_bit_accuracy = {val_metrics['bit_accuracy']:.4f}, "
-                    f"per_repetition_val_exact_accuracy = {val_metrics['exact_accuracy']:.4f}, "
-                    f"val_avg_pred_len = {val_metrics['avg_pred_length']:.2f}, "
-                    f"val_avg_target_len = {val_metrics['avg_target_length']:.2f}"
+            log(
+                format_epoch_log(
+                    epoch=epoch + 1,
+                    train_loss=train_loss,
+                    train_bit_accuracy=train_bit_accuracy,
+                    train_exact_accuracy=train_exact_accuracy,
+                    train_segment_metrics=train_segment_metrics,
+                    val_metrics=val_metrics,
+                    task=task,
                 )
-                if "voted_chunk_bit_accuracy" in val_metrics:
-                    epoch_log += (
-                        f", voted_chunk_val_bit_accuracy = {val_metrics['voted_chunk_bit_accuracy']:.4f}, "
-                        f"voted_chunk_val_exact_accuracy = {val_metrics['voted_chunk_exact_accuracy']:.4f}"
-                    )
-            log(epoch_log)
+            )
     except Exception as exc:
         log(f"Training failed: {type(exc).__name__}: {exc}")
         raise
     finally:
-        log_lines.append(f"Saved training log to: {log_path}")
-        write_log_file(log_path, log_lines)
-        print(f"Saved training log to: {log_path}")
+        logger.log(f"Saved training log to: {log_path}")
+        logger.save(print_message=False)
 
 
 if __name__ == "__main__":

@@ -10,13 +10,24 @@ from datasets.formats import EVENT_DTYPE
 
 DEFAULT_CONFIG_PATH = Path("config/hyperparameter.yaml")
 DEFAULT_OUTPUT_ROOT = Path("data/dataset_processed")
+DEFAULT_MOVING_AVERAGE_WINDOW = 25
+DEFAULT_BINS_PER_BIT = 25
+DEFAULT_IMAGE_WIDTH = 1280.0
+DEFAULT_IMAGE_HEIGHT = 720.0
 FEATURE_NAMES = [
     "log_pos",
     "log_neg",
     "log_total",
     "polarity_ratio",
-    "delta_log_total",
-    "delta_polarity_ratio",
+    "x_mean_norm",
+    "y_mean_norm",
+    "x_std_norm",
+    "y_std_norm",
+    "flicker_score",
+    "highpass_signal",
+    "delta_highpass_signal",
+    "rising_edge_score",
+    "falling_edge_score",
 ]
 
 
@@ -39,8 +50,11 @@ def parse_args():
     parser.add_argument(
         "--num-bins",
         type=int,
-        default=1750,
-        help="Number of equal-time bins per repetition.",
+        default=None,
+        help=(
+            "Number of equal-time bins per repetition. "
+            "Defaults to 25 bins per effective target bit."
+        ),
     )
     parser.add_argument(
         "--limit-samples",
@@ -54,6 +68,19 @@ def parse_args():
 def load_config(config_path):
     with config_path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def resolve_num_bins(config, requested_num_bins):
+    if requested_num_bins is not None:
+        return requested_num_bins
+
+    data_config = config["data"]
+    target_bit_length = int(data_config["target_bit_length"])
+    if data_config.get("include_start_end_bits", False):
+        target_bit_length += len(data_config.get("start_flag", ""))
+        target_bit_length += len(data_config.get("end_flag", ""))
+
+    return target_bit_length * DEFAULT_BINS_PER_BIT
 
 
 def get_ordered_repetition_windows(chunk_info):
@@ -81,7 +108,46 @@ def get_ordered_repetition_windows(chunk_info):
     return windows
 
 
-def summarize_repetition(rep_events, start_ns, end_ns, num_bins):
+def resolve_image_size(*objects):
+    width_keys = ("image_width", "sensor_width", "width")
+    height_keys = ("image_height", "sensor_height", "height")
+
+    def get_value(obj, keys):
+        if not isinstance(obj, dict):
+            return None
+        for key in keys:
+            value = obj.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value)
+        return None
+
+    width = None
+    height = None
+    for obj in objects:
+        if width is None:
+            width = get_value(obj, width_keys)
+        if height is None:
+            height = get_value(obj, height_keys)
+
+    return (
+        width if width is not None else DEFAULT_IMAGE_WIDTH,
+        height if height is not None else DEFAULT_IMAGE_HEIGHT,
+    )
+
+
+def centered_moving_average(signal, window_size=DEFAULT_MOVING_AVERAGE_WINDOW):
+    if window_size <= 1:
+        return signal.astype(np.float32, copy=True)
+
+    window_size = min(window_size, len(signal))
+    pad_left = window_size // 2
+    pad_right = window_size - 1 - pad_left
+    padded_signal = np.pad(signal, (pad_left, pad_right), mode="edge")
+    kernel = np.ones(window_size, dtype=np.float32) / float(window_size)
+    return np.convolve(padded_signal, kernel, mode="valid").astype(np.float32)
+
+
+def summarize_repetition(rep_events, start_ns, end_ns, num_bins, image_width, image_height):
     features = np.zeros((num_bins, len(FEATURE_NAMES)), dtype=np.float32)
 
     total_duration_ns = end_ns - start_ns
@@ -90,6 +156,10 @@ def summarize_repetition(rep_events, start_ns, end_ns, num_bins):
 
     pos_counts = np.zeros(num_bins, dtype=np.float32)
     neg_counts = np.zeros(num_bins, dtype=np.float32)
+    x_mean_norm = np.zeros(num_bins, dtype=np.float32)
+    y_mean_norm = np.zeros(num_bins, dtype=np.float32)
+    x_std_norm = np.zeros(num_bins, dtype=np.float32)
+    y_std_norm = np.zeros(num_bins, dtype=np.float32)
 
     if rep_events.size != 0:
         elapsed_ns = rep_events["witnessed_utc_ns"].astype(np.int64) - int(start_ns)
@@ -109,22 +179,75 @@ def summarize_repetition(rep_events, start_ns, end_ns, num_bins):
             minlength=num_bins,
         ).astype(np.float32)
 
+        total_counts = pos_counts + neg_counts
+        x_values = rep_events["x"].astype(np.float32)
+        y_values = rep_events["y"].astype(np.float32)
+        x_sum = np.bincount(bin_indices, weights=x_values, minlength=num_bins).astype(
+            np.float32
+        )
+        y_sum = np.bincount(bin_indices, weights=y_values, minlength=num_bins).astype(
+            np.float32
+        )
+        x_sq_sum = np.bincount(
+            bin_indices,
+            weights=x_values * x_values,
+            minlength=num_bins,
+        ).astype(np.float32)
+        y_sq_sum = np.bincount(
+            bin_indices,
+            weights=y_values * y_values,
+            minlength=num_bins,
+        ).astype(np.float32)
+
+        nonempty_mask = total_counts > 0
+        x_mean = np.zeros(num_bins, dtype=np.float32)
+        y_mean = np.zeros(num_bins, dtype=np.float32)
+        x_mean[nonempty_mask] = x_sum[nonempty_mask] / total_counts[nonempty_mask]
+        y_mean[nonempty_mask] = y_sum[nonempty_mask] / total_counts[nonempty_mask]
+        x_variance = np.zeros(num_bins, dtype=np.float32)
+        y_variance = np.zeros(num_bins, dtype=np.float32)
+        x_variance[nonempty_mask] = (
+            x_sq_sum[nonempty_mask] / total_counts[nonempty_mask]
+            - x_mean[nonempty_mask] * x_mean[nonempty_mask]
+        )
+        y_variance[nonempty_mask] = (
+            y_sq_sum[nonempty_mask] / total_counts[nonempty_mask]
+            - y_mean[nonempty_mask] * y_mean[nonempty_mask]
+        )
+        x_std = np.sqrt(np.maximum(x_variance, 0.0))
+        y_std = np.sqrt(np.maximum(y_variance, 0.0))
+        x_mean_norm = x_mean / image_width
+        y_mean_norm = y_mean / image_height
+        x_std_norm = x_std / image_width
+        y_std_norm = y_std / image_height
+
     log_pos = np.log1p(pos_counts)
     log_neg = np.log1p(neg_counts)
     total_counts = pos_counts + neg_counts
     log_total = np.log1p(total_counts)
     polarity_ratio = (pos_counts - neg_counts) / (total_counts + 1e-6)
-    delta_log_total = np.zeros_like(log_total)
-    delta_polarity_ratio = np.zeros_like(polarity_ratio)
-    delta_log_total[1:] = log_total[1:] - log_total[:-1]
-    delta_polarity_ratio[1:] = polarity_ratio[1:] - polarity_ratio[:-1]
+    flicker_score = (
+        2.0 * np.minimum(pos_counts, neg_counts) / (total_counts + 1e-6)
+    )
+    highpass_signal = log_total - centered_moving_average(log_total)
+    delta_highpass_signal = np.zeros_like(highpass_signal)
+    delta_highpass_signal[1:] = highpass_signal[1:] - highpass_signal[:-1]
+    rising_edge_score = np.maximum(delta_highpass_signal, 0.0)
+    falling_edge_score = np.maximum(-delta_highpass_signal, 0.0)
 
     features[:, 0] = log_pos
     features[:, 1] = log_neg
     features[:, 2] = log_total
     features[:, 3] = polarity_ratio
-    features[:, 4] = delta_log_total
-    features[:, 5] = delta_polarity_ratio
+    features[:, 4] = x_mean_norm
+    features[:, 5] = y_mean_norm
+    features[:, 6] = x_std_norm
+    features[:, 7] = y_std_norm
+    features[:, 8] = flicker_score
+    features[:, 9] = highpass_signal
+    features[:, 10] = delta_highpass_signal
+    features[:, 11] = rising_edge_score
+    features[:, 12] = falling_edge_score
 
     return features
 
@@ -157,6 +280,7 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
     print(f"Found {total_samples} chunk samples in master.json")
 
     sample_count = 0
+    printed_first_shape = False
     for sample_index, sample in enumerate(master["samples"], start=1):
         if sample["sample_name"] in excluded_samples:
             print(
@@ -192,6 +316,7 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
         chunk_info_path = dataset_root / sample["chunk_info_json"]
         with chunk_info_path.open("r", encoding="utf-8") as handle:
             chunk_info = json.load(handle)
+        image_width, image_height = resolve_image_size(sample, chunk_info, master)
 
         event_path = dataset_root / sample[event_path_key]
         events = np.fromfile(event_path, dtype=EVENT_DTYPE)
@@ -239,6 +364,8 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
                 start_ns=window["start_ns"],
                 end_ns=window["end_ns"],
                 num_bins=num_bins,
+                image_width=image_width,
+                image_height=image_height,
             )
 
             output_path = output_dir / f"{window['repetition_name']}.npy"
@@ -248,6 +375,9 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
                 f"  [saved] {output_path} "
                 f"events={int(rep_events.size)} nonzero_bins={nonzero_bins}"
             )
+            if not printed_first_shape:
+                print(f"first processed sample shape = {list(features.shape)}")
+                printed_first_shape = True
 
             manifest_entries.append(
                 {
@@ -300,10 +430,11 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
 def main():
     args = parse_args()
     config = load_config(args.config)
+    num_bins = resolve_num_bins(config, args.num_bins)
     manifest_path, manifest = build_processed_dataset(
         config=config,
         output_root=args.output_root,
-        num_bins=args.num_bins,
+        num_bins=num_bins,
         limit_samples=args.limit_samples,
     )
     print(f"Wrote manifest: {manifest_path}")
