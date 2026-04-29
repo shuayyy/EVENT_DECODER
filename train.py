@@ -27,7 +27,7 @@ from losses.fixed_bits import (
     grouped_fixed_bits_loss,
 )
 from model.model import LSTMdecoder, MambaDecoder, TransformerDecoder
-from log import TrainingLogger, format_epoch_log
+from log import LiveTrainingPlotter, TrainingLogger, format_epoch_log
 
 
 CONFIG_PATH = Path("config/hyperparameter.yaml")
@@ -662,8 +662,10 @@ def train():
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = Path(config["training"].get("log_dir", "outputs/logs"))
     log_path = log_dir / f"{run_timestamp}_{model_type}.txt"
+    live_plot_path = log_dir / f"{run_timestamp}_{model_type}_live.png"
     tokenizer = Tokenizer()
     logger = TrainingLogger(log_path)
+    live_plotter = LiveTrainingPlotter(live_plot_path)
     log = logger.log
     per_bit_accuracy_history = []
 
@@ -925,6 +927,15 @@ def train():
                 overfit_gap=overfit_gap,
             )
             log(epoch_log)
+            live_plotter.update(
+                epoch=epoch + 1,
+                train_loss=train_loss,
+                val_loss=val_metrics["loss"],
+                train_bit_accuracy=train_bit_accuracy,
+                val_bit_accuracy=val_metrics["bit_accuracy"],
+                overfit_gap=overfit_gap,
+                best_val_bit_accuracy=best_val_bit_accuracy,
+            )
 
             if task == "fixed_bits" and (
                 (epoch + 1) == 1
@@ -964,6 +975,11 @@ def train():
         log(f"Training failed: {type(exc).__name__}: {exc}")
         raise
     finally:
+        live_plotter.close()
+        if live_plotter.enabled:
+            logger.log(f"Saved live training plot to: {live_plot_path}")
+        else:
+            logger.log("Live training plot was disabled because matplotlib could not be initialized.")
         if task == "fixed_bits" and per_bit_accuracy_history:
             plot_path = (
                 Path("outputs/per_bit_accuracy")

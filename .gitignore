@@ -3,7 +3,7 @@ model/model.txt
 __pycache__/
 scripts/__pycache__/
 model/__pycache__/
-outputs/
+.codex
 
 # Keep only the processed dataset used by train.py.
 /data/*

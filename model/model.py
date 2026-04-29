@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
-from mamba_ssm import Mamba
+# from mamba_ssm import Mamba
 
 
 class PositionalEncoding(nn.Module):
@@ -50,7 +50,11 @@ class LSTMdecoder(nn.Module):
             else None
         )
 
-        self.encoder = nn.Linear(input_dim, hidden_dim)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
 
         self.temporal_model = nn.LSTM(
             input_size=hidden_dim,
