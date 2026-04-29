@@ -23,7 +23,30 @@
         "avg_stop_step": 1999.888888888889,
         "loss": 60624.42207612465
       }
+    },
+    {
+      "epoch": 2,
+      "train": {
+        "bit_accuracy": 0.9820468048303226,
+        "exact_accuracy": 0.9193154034229829,
+        "continue_accuracy": 0.9991350616977384,
+        "premature_stop_rate": 0.009779951100244499,
+        "stop_step_mae": 14.916870415647923,
+        "time_mae_us": 557593.0319185513,
+        "avg_stop_step": 1933.20293398533,
+        "loss": 55782.83745818636
+      },
+      "val": {
+        "bit_accuracy": 0.641587307718065,
+        "exact_accuracy": 0.0,
+        "continue_accuracy": 0.9992933392524719,
+        "premature_stop_rate": 0.0,
+        "stop_step_mae": 0.0,
+        "time_mae_us": 517657.6928819445,
+        "avg_stop_step": 1999.888888888889,
+        "loss": 51783.87457264953
+      }
     }
   ],
-  "best_val_bit_accuracy": 0.6250793708695306
+  "best_val_bit_accuracy": 0.641587307718065
 }

@@ -12,8 +12,7 @@ from recurrent_event_decoder.collate import recurrent_event_collate
 from recurrent_event_decoder.config import RecurrentEventConfig
 from recurrent_event_decoder.dataset import PreparedRecurrentEventDataset
 from recurrent_event_decoder.losses import (
-    build_continue_targets,
-    final_recurrent_event_vector_loss,
+    recurrent_event_vector_loss,
 )
 from recurrent_event_decoder.metrics import compute_recurrent_metrics
 from recurrent_event_decoder.model import RecurrentEventDecoder
@@ -235,20 +234,15 @@ def run_epoch(model, loader, optimizer, device, config, epoch, phase):
     with context:
         for batch in loader:
             batch = move_batch_to_device(batch, device)
-            final_step_mask = build_continue_targets(
+            outputs = model(batch.windows, batch.metadata, batch.valid_window_mask)
+            loss = recurrent_event_vector_loss(
+                outputs,
                 batch.targets,
                 batch.valid_window_mask,
                 config,
-            ) >= config.stop_threshold
-            outputs = model(batch.windows, batch.metadata, batch.valid_window_mask)
-            loss = final_recurrent_event_vector_loss(
-                outputs,
-                batch.targets,
-                final_step_mask,
-                config,
             )
 
-            if is_train and loss is not None:
+            if is_train:
                 optimizer.zero_grad()
                 loss.backward()
                 if config.grad_clip is not None:
@@ -261,7 +255,7 @@ def run_epoch(model, loader, optimizer, device, config, epoch, phase):
                 batch.valid_window_mask,
                 config,
             )
-            total_loss += loss.item() if loss is not None else 0.0
+            total_loss += loss.item()
             for key, value in metrics.items():
                 metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
             batch_count += 1
