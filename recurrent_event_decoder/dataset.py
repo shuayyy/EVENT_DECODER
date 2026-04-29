@@ -31,7 +31,7 @@ class RecurrentEventDataset(Dataset):
         raise NotImplementedError("Return [windows, 7500, 4] event tensors.")
 
     def load_target_vector(self, sample_ref):
-        raise NotImplementedError("Return [72] target vector.")
+        raise NotImplementedError("Return [71] target vector.")
 
 
 class PreparedRecurrentEventDataset(Dataset):
@@ -46,6 +46,16 @@ class PreparedRecurrentEventDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def normalize_windows(self, windows):
+        if not self.config.normalize_inputs:
+            return windows
+
+        windows = windows.clone()
+        windows[..., 0] = windows[..., 0] / float(self.config.sensor_width)
+        windows[..., 1] = windows[..., 1] / float(self.config.sensor_height)
+        windows[..., 3] = windows[..., 3] / float(self.config.time_scale_us)
+        return windows
+
     def __getitem__(self, index):
         sample = self.samples[index]
         windows = torch.from_numpy(
@@ -53,7 +63,14 @@ class PreparedRecurrentEventDataset(Dataset):
         ).to(dtype=torch.float32)
         if self.config.max_windows is not None:
             windows = windows[: self.config.max_windows]
+        windows = self.normalize_windows(windows)
         target = torch.tensor(sample["target"], dtype=torch.float32)
+        if target.numel() < self.config.output_dim:
+            raise ValueError(
+                f"{sample['sample_name']} target has {target.numel()} values; "
+                f"expected at least {self.config.output_dim}"
+            )
+        target = target[: self.config.output_dim]
         valid_window_mask = torch.ones(windows.shape[0], dtype=torch.bool)
 
         return RecurrentEventSample(
@@ -94,7 +111,6 @@ class SyntheticRecurrentEventDataset(Dataset):
             generator=self.generator,
         ).to(dtype=torch.float32)
         target[self.config.continue_index] = self.config.stop_threshold
-        target[self.config.time_index] = torch.rand((), generator=self.generator) * 1000.0
 
         return RecurrentEventSample(
             windows=windows,

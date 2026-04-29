@@ -22,6 +22,7 @@ class PrepareOptions:
     include_warnings: bool
     include_empty: bool
     max_windows: int | None
+    event_subsample_stride: int
     time_target: str
     overwrite: bool
     dry_run: bool
@@ -100,14 +101,19 @@ def parse_args():
         help="Optional cap for windows per episode. Defaults to the full chunk.",
     )
     parser.add_argument(
+        "--event-subsample-stride",
+        type=int,
+        default=1,
+        help=(
+            "Keep one incoming event every N events before windowing. "
+            "For example, 10 keeps events 0, 10, 20, ..."
+        ),
+    )
+    parser.add_argument(
         "--time-target",
         choices=("end_from_first_event", "end_from_window_start", "duration"),
         default="end_from_first_event",
-        help=(
-            "Value stored in target[71]. end_from_first_event is nominal end "
-            "time minus first witnessed incoming event time. end_from_window_start uses "
-            "requested_window_start_utc_ns. duration is nominal end minus nominal start."
-        ),
+        help="Deprecated compatibility option. End-time prediction is no longer used.",
     )
     parser.add_argument(
         "--limit",
@@ -161,18 +167,6 @@ def build_target_vector(chunk_info, time_target_mode, first_event_utc_ns):
     target[: config.bit_count] = np.fromiter((int(bit) for bit in bits), dtype=np.float32)
     target[config.continue_index] = config.stop_threshold
 
-    timing = chunk_info["timing"]
-    nominal_end_micro = float(timing["nominal_end_time_micro"])
-    if time_target_mode == "duration":
-        target_time_micro = nominal_end_micro - float(timing["nominal_start_time_micro"])
-    elif time_target_mode == "end_from_window_start":
-        target_time_micro = nominal_end_micro - (
-            float(timing["requested_window_start_utc_ns"]) / 1000.0
-        )
-    else:
-        target_time_micro = nominal_end_micro - (float(first_event_utc_ns) / 1000.0)
-
-    target[config.time_index] = target_time_micro
     return target
 
 
@@ -184,6 +178,12 @@ def event_count_from_file(event_path):
             f"{EVENT_DTYPE.itemsize}"
         )
     return size // EVENT_DTYPE.itemsize
+
+
+def sampled_event_count(event_count, event_subsample_stride):
+    if event_subsample_stride < 1:
+        raise ValueError("--event-subsample-stride must be at least 1")
+    return math.ceil(event_count / event_subsample_stride)
 
 
 def make_episode_paths(output_root, chunk_info):
@@ -205,10 +205,12 @@ def write_windows(
     window_size,
     keep_partial,
     max_windows=None,
+    event_subsample_stride=1,
 ):
-    event_count = event_count_from_file(event_path)
-    if event_count == 0:
+    source_event_count = event_count_from_file(event_path)
+    if source_event_count == 0:
         raise ValueError(f"{event_path} contains no events")
+    event_count = sampled_event_count(source_event_count, event_subsample_stride)
 
     if keep_partial:
         window_count = math.ceil(event_count / window_size)
@@ -235,7 +237,9 @@ def write_windows(
     for window_index in range(window_count):
         start = window_index * window_size
         end = min(start + window_size, event_count)
-        event_slice = events[start:end]
+        source_start = start * event_subsample_stride
+        source_end = min(end * event_subsample_stride, source_event_count)
+        event_slice = events[source_start:source_end:event_subsample_stride]
         valid_count = end - start
         valid_counts[window_index] = valid_count
 
@@ -253,6 +257,8 @@ def write_windows(
     np.save(valid_counts_path, valid_counts, allow_pickle=False)
     return {
         "event_count": int(event_count),
+        "source_event_count": int(source_event_count),
+        "event_subsample_stride": int(event_subsample_stride),
         "window_count": int(window_count),
         "first_event_utc_ns": int(first_event_utc_ns),
     }
@@ -278,12 +284,16 @@ def prepare_episode(
     file_event_count = event_count_from_file(event_path)
     if file_event_count == 0 and not options.include_empty:
         return None, f"skipped empty chunk: {chunk_info['sample_name']}"
+    prepared_event_count = sampled_event_count(
+        file_event_count,
+        options.event_subsample_stride,
+    )
 
     keep_partial = not options.drop_partial
     window_count = (
-        math.ceil(file_event_count / options.window_size)
+        math.ceil(prepared_event_count / options.window_size)
         if keep_partial
-        else file_event_count // options.window_size
+        else prepared_event_count // options.window_size
     )
     if options.max_windows is not None:
         window_count = min(window_count, options.max_windows)
@@ -293,13 +303,17 @@ def prepare_episode(
     paths = make_episode_paths(output_root, chunk_info)
     if paths["windows"].exists() and not options.overwrite:
         metadata = {
-            "event_count": file_event_count,
+            "event_count": int(np.load(paths["valid_event_counts"]).sum()),
+            "source_event_count": file_event_count,
+            "event_subsample_stride": options.event_subsample_stride,
             "window_count": int(np.load(paths["valid_event_counts"]).shape[0]),
             "first_event_utc_ns": int(chunk_info["incoming_events"]["first_event_utc_ns"]),
         }
     elif options.dry_run:
         metadata = {
-            "event_count": file_event_count,
+            "event_count": prepared_event_count,
+            "source_event_count": file_event_count,
+            "event_subsample_stride": options.event_subsample_stride,
             "window_count": int(window_count),
             "first_event_utc_ns": int(chunk_info["incoming_events"]["first_event_utc_ns"]),
         }
@@ -311,6 +325,7 @@ def prepare_episode(
             window_size=options.window_size,
             keep_partial=keep_partial,
             max_windows=options.max_windows,
+            event_subsample_stride=options.event_subsample_stride,
         )
 
     target = build_target_vector(
@@ -328,6 +343,8 @@ def prepare_episode(
         "windows_path": str(rel_windows_path),
         "valid_event_counts_path": str(rel_counts_path),
         "event_count": metadata["event_count"],
+        "source_event_count": metadata["source_event_count"],
+        "event_subsample_stride": metadata["event_subsample_stride"],
         "window_count": metadata["window_count"],
         "window_size": options.window_size,
         "frequency": chunk_info["label"]["frequency"],
@@ -413,6 +430,8 @@ def main():
     args = parse_args()
     if args.num_workers < 1:
         raise ValueError("--num-workers must be at least 1")
+    if args.event_subsample_stride < 1:
+        raise ValueError("--event-subsample-stride must be at least 1")
 
     options = PrepareOptions(
         dataset_root=args.dataset_root,
@@ -422,6 +441,7 @@ def main():
         include_warnings=args.include_warnings,
         include_empty=args.include_empty,
         max_windows=args.max_windows,
+        event_subsample_stride=args.event_subsample_stride,
         time_target=args.time_target,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
@@ -474,6 +494,7 @@ def main():
     manifest = {
         "dataset_root": str(dataset_root),
         "window_size": options.window_size,
+        "event_subsample_stride": options.event_subsample_stride,
         "event_source": "incoming_events",
         "feature_order": ["x", "y", "polarity", "relative_time_us"],
         "time_reference": (
@@ -483,11 +504,9 @@ def main():
         "target_layout": {
             "bits": [0, 69],
             "continue_index": 70,
-            "time_index": 71,
-            "time_mode": options.time_target,
-            "default_time_mode_description": (
-                "end_from_first_event stores nominal_end_time_micro minus the first "
-                "witnessed incoming event time in microseconds."
+            "continue_target": (
+                "During training, the continue target is computed at the selected "
+                "cutoff step as elapsed episode time divided by total episode time."
             ),
         },
         "num_workers": args.num_workers,

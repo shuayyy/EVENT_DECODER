@@ -91,6 +91,7 @@ def train_one_epoch(model, loader, optimizer, device, config=None):
             batch.targets,
             batch.valid_window_mask,
             config,
+            windows=batch.windows,
         )
 
         optimizer.zero_grad()
@@ -121,12 +122,14 @@ def evaluate(model, loader, device, config=None):
                 batch.targets,
                 batch.valid_window_mask,
                 config,
+                windows=batch.windows,
             )
             metrics = compute_recurrent_metrics(
                 outputs,
                 batch.targets,
                 batch.valid_window_mask,
                 config,
+                batch.windows,
             )
 
             total_loss += loss.item()

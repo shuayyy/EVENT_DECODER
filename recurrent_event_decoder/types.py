@@ -26,7 +26,5 @@ class RecurrentEventBatch:
 class RecurrentEventPrediction:
     bits: torch.Tensor
     continue_value: torch.Tensor
-    time_us: torch.Tensor
     stop_step: torch.Tensor
     raw_output: torch.Tensor
-

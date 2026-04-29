@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -11,10 +11,7 @@ from torch.utils.data import DataLoader
 from recurrent_event_decoder.collate import recurrent_event_collate
 from recurrent_event_decoder.config import RecurrentEventConfig
 from recurrent_event_decoder.dataset import PreparedRecurrentEventDataset
-from recurrent_event_decoder.losses import (
-    build_continue_targets,
-    final_recurrent_event_vector_loss,
-)
+from recurrent_event_decoder.losses import cutoff_recurrent_event_vector_loss
 from recurrent_event_decoder.metrics import compute_recurrent_metrics
 from recurrent_event_decoder.model import RecurrentEventDecoder
 from recurrent_event_decoder.train import move_batch_to_device
@@ -57,7 +54,7 @@ class RecurrentTrainingPlotter:
         self.train_bit_accuracy = []
         self.val_bit_accuracy = []
         self.val_continue_accuracy = []
-        self.val_time_mae_us = []
+        self.val_progress_mae = []
 
         try:
             import os
@@ -98,11 +95,11 @@ class RecurrentTrainingPlotter:
             self.axes[1].grid(True, alpha=0.3)
             self.axes[1].legend()
 
-            (self.val_time_line,) = self.axes[2].plot(
-                [], [], label="val_time_mae_us", color="#8c564b"
+            (self.val_progress_line,) = self.axes[2].plot(
+                [], [], label="val_progress_mae", color="#8c564b"
             )
             self.axes[2].set_xlabel("Epoch")
-            self.axes[2].set_ylabel("Time MAE (us)")
+            self.axes[2].set_ylabel("Progress MAE")
             self.axes[2].grid(True, alpha=0.3)
             self.axes[2].legend()
 
@@ -121,14 +118,14 @@ class RecurrentTrainingPlotter:
         self.train_bit_accuracy.append(train_metrics.get("bit_accuracy", 0.0))
         self.val_bit_accuracy.append(val_metrics.get("bit_accuracy", 0.0))
         self.val_continue_accuracy.append(val_metrics.get("continue_accuracy", 0.0))
-        self.val_time_mae_us.append(val_metrics.get("time_mae_us", 0.0))
+        self.val_progress_mae.append(val_metrics.get("progress_mae", 0.0))
 
         self.train_loss_line.set_data(self.epochs, self.train_loss)
         self.val_loss_line.set_data(self.epochs, self.val_loss)
         self.train_bit_line.set_data(self.epochs, self.train_bit_accuracy)
         self.val_bit_line.set_data(self.epochs, self.val_bit_accuracy)
         self.val_continue_line.set_data(self.epochs, self.val_continue_accuracy)
-        self.val_time_line.set_data(self.epochs, self.val_time_mae_us)
+        self.val_progress_line.set_data(self.epochs, self.val_progress_mae)
 
         for axis in self.axes:
             axis.relim()
@@ -162,10 +159,57 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=0.0003)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--no-weighted-bce",
+        action="store_true",
+        help="Disable per-bit positive weighting in BCE loss.",
+    )
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--encoder-layers", type=int, default=3)
     parser.add_argument("--encoder-stride", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--window-encoder-type",
+        choices=("summary", "conv"),
+        default="summary",
+        help="summary pools each event window; conv uses the old Conv1d encoder.",
+    )
+    parser.add_argument("--event-summary-hidden-dim", type=int, default=64)
+    parser.add_argument("--temp-encoder-1-dim", type=int, default=512)
+    parser.add_argument("--temp-encoder-2-dim", type=int, default=128)
+    parser.add_argument("--temp-encoder-3-dim", type=int, default=64)
+    parser.add_argument("--recurrent-1-dim", type=int, default=80)
+    parser.add_argument("--temp-encoder-4-dim", type=int, default=80)
+    parser.add_argument("--linear-dim", type=int, default=80)
+    parser.add_argument("--temp-decoder-dim", type=int, default=80)
+    parser.add_argument("--recurrent-2-dim", type=int, default=128)
+    parser.add_argument("--output-fc-layers", type=int, default=2)
+    parser.add_argument("--output-fc-dim", type=int, default=128)
+    parser.add_argument(
+        "--activation-checkpointing",
+        action="store_true",
+        help="Trade extra compute for lower activation memory in temporal encoders.",
+    )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Use CUDA automatic mixed precision to reduce memory.",
+    )
+    parser.add_argument(
+        "--no-normalize-inputs",
+        action="store_true",
+        help="Disable event and metadata input normalization.",
+    )
+    parser.add_argument("--sensor-width", type=float, default=1280.0)
+    parser.add_argument("--sensor-height", type=float, default=720.0)
+    parser.add_argument(
+        "--time-scale-us",
+        type=float,
+        default=1_000_000.0,
+        help="Divisor for relative_time_us input. Default converts us to seconds.",
+    )
+    parser.add_argument("--repetition-scale", type=float, default=15.0)
+    parser.add_argument("--frequency-scale", type=float, default=1000.0)
     parser.add_argument(
         "--max-windows",
         type=int,
@@ -200,6 +244,12 @@ def parse_args():
         type=Path,
         default=Path("outputs/recurrent_event_decoder/metrics.json"),
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help="Resume model and optimizer state from a previous checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -223,7 +273,30 @@ def average_metrics(metric_sums, batch_count):
     }
 
 
-def run_epoch(model, loader, optimizer, device, config, epoch, phase):
+def compute_bit_pos_weight(dataset, bit_count):
+    positives = torch.zeros(bit_count, dtype=torch.float64)
+    total = 0
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        positives += sample.target[:bit_count].to(dtype=torch.float64)
+        total += 1
+    if total == 0:
+        return torch.ones(bit_count, dtype=torch.float32).tolist()
+
+    negatives = float(total) - positives
+    weights = negatives / positives.clamp_min(1.0)
+    weights = torch.where(positives > 0, weights, torch.ones_like(weights))
+    return weights.to(dtype=torch.float32).tolist()
+
+
+def make_grad_scaler(enabled):
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except TypeError:
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def run_epoch(model, loader, optimizer, device, config, epoch, phase, scaler=None):
     is_train = optimizer is not None
     model.train(is_train)
     progress = ProgressBar(len(loader), f"{phase} epoch {epoch}")
@@ -235,33 +308,47 @@ def run_epoch(model, loader, optimizer, device, config, epoch, phase):
     with context:
         for batch in loader:
             batch = move_batch_to_device(batch, device)
-            final_step_mask = build_continue_targets(
-                batch.targets,
-                batch.valid_window_mask,
-                config,
-            ) >= config.stop_threshold
-            outputs = model(batch.windows, batch.metadata, batch.valid_window_mask)
-            loss = final_recurrent_event_vector_loss(
-                outputs,
-                batch.targets,
-                final_step_mask,
-                config,
-            )
+            autocast_enabled = config.use_amp and device.type == "cuda"
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=autocast_enabled,
+            ):
+                outputs = model(batch.windows, batch.metadata, batch.valid_window_mask)
+                loss = cutoff_recurrent_event_vector_loss(
+                    outputs,
+                    batch.targets,
+                    batch.valid_window_mask,
+                    batch.windows,
+                    config,
+                )
 
-            if is_train and loss is not None:
-                optimizer.zero_grad()
-                loss.backward()
-                if config.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-                optimizer.step()
+            if is_train:
+                optimizer.zero_grad(set_to_none=True)
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    if config.grad_clip is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            config.grad_clip,
+                        )
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if config.grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                    optimizer.step()
 
             metrics = compute_recurrent_metrics(
                 outputs.detach(),
                 batch.targets,
                 batch.valid_window_mask,
                 config,
+                batch.windows,
             )
-            total_loss += loss.item() if loss is not None else 0.0
+            total_loss += loss.item()
             for key, value in metrics.items():
                 metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
             batch_count += 1
@@ -289,6 +376,54 @@ def save_checkpoint(path, model, optimizer, config, epoch, metrics):
     )
 
 
+def load_checkpoint(path, model, optimizer, device):
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    return checkpoint
+
+
+def load_existing_history(metrics_path):
+    if not metrics_path.exists():
+        return [], -1.0, None
+
+    with metrics_path.open("r", encoding="utf-8") as handle:
+        metrics = json.load(handle)
+    history = metrics.get("history", [])
+    best_average = metrics.get("best_average_bit_accuracy", -1.0)
+    started_at = metrics.get("started_at")
+    return history, best_average, started_at
+
+
+def coerce_config(config):
+    defaults = RecurrentEventConfig()
+    values = {
+        field.name: getattr(config, field.name, getattr(defaults, field.name))
+        for field in fields(defaults)
+    }
+    return replace(defaults, **values)
+
+
+def infer_window_encoder_type_from_state_dict(state_dict):
+    if any(key.startswith("window_summary_encoder.") for key in state_dict):
+        return "summary"
+    if any(key.startswith("temp_encoder_1.") for key in state_dict):
+        return "conv"
+    return None
+
+
+def infer_output_fc_layers_from_state_dict(state_dict):
+    if any(key.startswith("post_recurrent_fc.") for key in state_dict):
+        layer_indices = set()
+        for key in state_dict:
+            if key.startswith("post_recurrent_fc.") and key.split(".")[-1] == "weight":
+                parts = key.split(".")
+                if len(parts) > 2 and parts[1].isdigit() and int(parts[1]) % 4 == 1:
+                    layer_indices.add(int(parts[1]))
+        return len(layer_indices)
+    return 0
+
+
 def main():
     args = parse_args()
     if not args.manifest.exists():
@@ -297,18 +432,69 @@ def main():
             "Run recurrent_event_decoder.prepare_incoming_events first."
         )
 
+    base_config = RecurrentEventConfig()
+    resume_checkpoint = None
+    if args.resume_checkpoint is not None:
+        if not args.resume_checkpoint.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {args.resume_checkpoint}")
+        resume_checkpoint = torch.load(
+            args.resume_checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
+        raw_config = resume_checkpoint.get("config", base_config)
+        checkpoint_encoder_type = infer_window_encoder_type_from_state_dict(
+            resume_checkpoint["model_state_dict"]
+        )
+        checkpoint_output_fc_layers = infer_output_fc_layers_from_state_dict(
+            resume_checkpoint["model_state_dict"]
+        )
+        base_config = coerce_config(raw_config)
+        if checkpoint_encoder_type is not None:
+            base_config = replace(base_config, window_encoder_type=checkpoint_encoder_type)
+        base_config = replace(base_config, output_fc_layers=checkpoint_output_fc_layers)
+
     config = replace(
-        RecurrentEventConfig(),
+        base_config,
         prepared_manifest=args.manifest,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
+        use_weighted_bce=not args.no_weighted_bce,
         hidden_dim=args.hidden_dim,
         encoder_layers=args.encoder_layers,
         encoder_stride=args.encoder_stride,
         dropout=args.dropout,
+        window_encoder_type=args.window_encoder_type
+        if resume_checkpoint is None
+        else base_config.window_encoder_type,
+        event_summary_hidden_dim=args.event_summary_hidden_dim
+        if resume_checkpoint is None
+        else getattr(base_config, "event_summary_hidden_dim", 64),
+        temp_encoder_1_dim=args.temp_encoder_1_dim,
+        temp_encoder_2_dim=args.temp_encoder_2_dim,
+        temp_encoder_3_dim=args.temp_encoder_3_dim,
+        recurrent_1_dim=args.recurrent_1_dim,
+        temp_encoder_4_dim=args.temp_encoder_4_dim,
+        linear_dim=args.linear_dim,
+        temp_decoder_dim=args.temp_decoder_dim,
+        recurrent_2_dim=args.recurrent_2_dim,
+        output_fc_layers=args.output_fc_layers
+        if resume_checkpoint is None
+        else base_config.output_fc_layers,
+        output_fc_dim=args.output_fc_dim
+        if resume_checkpoint is None
+        else base_config.output_fc_dim,
+        activation_checkpointing=args.activation_checkpointing,
+        use_amp=args.amp,
+        normalize_inputs=not args.no_normalize_inputs,
+        sensor_width=args.sensor_width,
+        sensor_height=args.sensor_height,
+        time_scale_us=args.time_scale_us,
+        repetition_scale=args.repetition_scale,
+        frequency_scale=args.frequency_scale,
         max_windows=args.max_windows,
     )
     device = torch.device(
@@ -316,6 +502,11 @@ def main():
     )
     dataset = PreparedRecurrentEventDataset(args.manifest, config=config)
     train_dataset, val_dataset = split_dataset(dataset, args.val_ratio, args.seed)
+    if config.use_weighted_bce and resume_checkpoint is None:
+        config = replace(
+            config,
+            bit_pos_weight=compute_bit_pos_weight(train_dataset, config.bit_count),
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -338,10 +529,21 @@ def main():
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    scaler = make_grad_scaler(config.use_amp and device.type == "cuda")
     plotter = RecurrentTrainingPlotter(args.plot_path)
     history = []
-    best_val_bit_accuracy = -1.0
+    best_average_bit_accuracy = -1.0
     run_started_at = datetime.now().isoformat(timespec="seconds")
+    start_epoch = 1
+
+    if args.resume_checkpoint is not None:
+        checkpoint = load_checkpoint(args.resume_checkpoint, model, optimizer, device)
+        start_epoch = int(checkpoint["epoch"]) + 1
+        history, best_average_bit_accuracy, previous_started_at = load_existing_history(
+            args.metrics_path
+        )
+        if previous_started_at is not None:
+            run_started_at = previous_started_at
 
     print(f"Run started: {run_started_at}", flush=True)
     print(f"Manifest: {args.manifest}", flush=True)
@@ -349,9 +551,14 @@ def main():
     print(f"Device: {device}", flush=True)
     print(f"Live plot: {args.plot_path}", flush=True)
     print(f"Checkpoints: {args.checkpoint_dir}", flush=True)
+    if args.resume_checkpoint is not None:
+        print(
+            f"Resumed from: {args.resume_checkpoint} at epoch {start_epoch}",
+            flush=True,
+        )
 
     try:
-        for epoch in range(1, config.epochs + 1):
+        for epoch in range(start_epoch, config.epochs + 1):
             train_metrics = run_epoch(
                 model,
                 train_loader,
@@ -360,6 +567,7 @@ def main():
                 config,
                 epoch,
                 "train",
+                scaler,
             )
             val_metrics = run_epoch(
                 model,
@@ -369,6 +577,7 @@ def main():
                 config,
                 epoch,
                 "val",
+                None,
             )
 
             epoch_record = {
@@ -376,6 +585,11 @@ def main():
                 "train": train_metrics,
                 "val": val_metrics,
             }
+            average_bit_accuracy = (
+                train_metrics.get("bit_accuracy", 0.0)
+                + val_metrics.get("bit_accuracy", 0.0)
+            ) / 2.0
+            epoch_record["average_bit_accuracy"] = average_bit_accuracy
             history.append(epoch_record)
             plotter.update(epoch, train_metrics, val_metrics)
 
@@ -386,8 +600,9 @@ def main():
                 f"train_bit_acc={train_metrics.get('bit_accuracy', 0.0):.4f}, "
                 f"val_loss={val_metrics['loss']:.4f}, "
                 f"val_bit_acc={val_metrics.get('bit_accuracy', 0.0):.4f}, "
+                f"avg_bit_acc={average_bit_accuracy:.4f}, "
                 f"val_continue_acc={val_metrics.get('continue_accuracy', 0.0):.4f}, "
-                f"val_time_mae_us={val_metrics.get('time_mae_us', 0.0):.2f}"
+                f"val_progress_mae={val_metrics.get('progress_mae', 0.0):.4f}"
             )
 
             save_checkpoint(
@@ -398,9 +613,8 @@ def main():
                 epoch,
                 epoch_record,
             )
-            val_bit_accuracy = val_metrics.get("bit_accuracy", 0.0)
-            if val_bit_accuracy > best_val_bit_accuracy:
-                best_val_bit_accuracy = val_bit_accuracy
+            if average_bit_accuracy > best_average_bit_accuracy:
+                best_average_bit_accuracy = average_bit_accuracy
                 save_checkpoint(
                     args.checkpoint_dir / "best.pt",
                     model,
@@ -416,7 +630,7 @@ def main():
                     {
                         "started_at": run_started_at,
                         "history": history,
-                        "best_val_bit_accuracy": best_val_bit_accuracy,
+                        "best_average_bit_accuracy": best_average_bit_accuracy,
                     },
                     indent=2,
                 ),

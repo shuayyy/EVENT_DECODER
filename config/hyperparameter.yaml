@@ -35,11 +35,10 @@ training:
 
 recurrent_event:
   prepared_manifest: data/recurrent_event_processed/manifest.json
-  output_dim: 72
+  output_dim: 71
   continue_index: 70
   stop_threshold: 1.0
-  stop_training_on_continue: false
-  time_index: 71
+  stop_training_on_continue: true
 
 ctc_decode:
   method: greedy # greedy, beam
