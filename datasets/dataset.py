@@ -95,6 +95,7 @@ class ProcessedRepetitionDataset(Dataset):
         self,
         manifest_path,
         sequences=None,
+        rep=True,
         include_start_end_bits=False,
         start_flag="",
         end_flag="",
@@ -104,6 +105,7 @@ class ProcessedRepetitionDataset(Dataset):
         self.dataset_root = self.manifest_path.parent
         self.tokenizer = Tokenizer()
         self.sequence_filter = set(sequences) if sequences is not None else None
+        self.use_repetitions = rep
         self.include_start_end_bits = include_start_end_bits
         self.start_flag = start_flag
         self.end_flag = end_flag
@@ -149,6 +151,8 @@ class ProcessedRepetitionDataset(Dataset):
         for sample in manifest["repetitions"]:
             if self.sequence_filter is not None and sample["sequence"] not in self.sequence_filter:
                 continue
+            if not self.use_repetitions and int(sample.get("repetition_index", 1)) != 1:
+                continue
 
             samples.append(
                 {
@@ -165,3 +169,112 @@ class ProcessedRepetitionDataset(Dataset):
             )
 
         return samples
+
+
+class GroupedProcessedRepetitionDataset(Dataset):
+    def __init__(
+        self,
+        manifest_path,
+        sequences=None,
+        include_start_end_bits=False,
+        start_flag="",
+        end_flag="",
+        group_key="source_sample_name",
+    ):
+        self.manifest_path = Path(manifest_path)
+        self.dataset_root = self.manifest_path.parent
+        self.tokenizer = Tokenizer()
+        self.sequence_filter = set(sequences) if sequences is not None else None
+        self.include_start_end_bits = include_start_end_bits
+        self.start_flag = start_flag
+        self.end_flag = end_flag
+        self.group_key = group_key
+        self.groups = self._load_groups()
+
+    def __len__(self):
+        return len(self.groups)
+
+    def __getitem__(self, idx):
+        group = self.groups[idx]
+
+        repetition_inputs = [
+            torch.from_numpy(
+                np.load(rep["processed_path"], allow_pickle=False)
+            ).to(dtype=torch.float32)
+            for rep in group["repetitions"]
+        ]
+
+        target = self.tokenizer.encode(
+            self._compose_bitstream(group["transmitted_bits"])
+        )
+
+        metadata = {
+            "sequence": group["sequence"],
+            "source_sample_name": group["source_sample_name"],
+            "data_dir": group["data_dir"],
+            "chunk_dir": group["chunk_dir"],
+            "chunk_name": group["chunk_name"],
+            "vote_group_id": group["source_sample_name"],
+            "num_repetitions": len(group["repetitions"]),
+            "repetitions": [
+                {
+                    "repetition_name": rep["repetition_name"],
+                    "repetition_index": rep["repetition_index"],
+                }
+                for rep in group["repetitions"]
+            ],
+        }
+
+        return repetition_inputs, target, metadata
+
+    def _compose_bitstream(self, transmitted_bits):
+        if not self.include_start_end_bits:
+            return transmitted_bits
+        return f"{self.start_flag}{transmitted_bits}{self.end_flag}"
+
+    def _load_groups(self):
+        with self.manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+
+        grouped = {}
+
+        for sample in manifest["repetitions"]:
+            if (
+                self.sequence_filter is not None
+                and sample["sequence"] not in self.sequence_filter
+            ):
+                continue
+
+            group_id = sample[self.group_key]
+
+            if group_id not in grouped:
+                grouped[group_id] = {
+                    "sequence": sample["sequence"],
+                    "source_sample_name": sample["source_sample_name"],
+                    "data_dir": sample["data_dir"],
+                    "chunk_dir": sample["chunk_dir"],
+                    "chunk_name": sample["chunk_name"],
+                    "transmitted_bits": sample["transmitted_bits"],
+                    "repetitions": [],
+                }
+
+            if sample["transmitted_bits"] != grouped[group_id]["transmitted_bits"]:
+                raise AssertionError(
+                    f"Group {group_id} has inconsistent transmitted_bits"
+                )
+
+            grouped[group_id]["repetitions"].append(
+                {
+                    "repetition_name": sample["repetition_name"],
+                    "repetition_index": sample["repetition_index"],
+                    "processed_path": self.dataset_root / sample["processed_path"],
+                }
+            )
+
+        groups = list(grouped.values())
+
+        for group in groups:
+            group["repetitions"].sort(key=lambda rep: rep["repetition_index"])
+
+        groups.sort(key=lambda group: group["source_sample_name"])
+        return groups

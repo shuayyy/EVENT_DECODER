@@ -11,7 +11,7 @@ from datasets.formats import EVENT_DTYPE
 DEFAULT_CONFIG_PATH = Path("config/hyperparameter.yaml")
 DEFAULT_OUTPUT_ROOT = Path("data/dataset_processed")
 DEFAULT_MOVING_AVERAGE_WINDOW = 25
-DEFAULT_BINS_PER_BIT = 25
+DEFAULT_BINS_PER_BIT = 2
 DEFAULT_IMAGE_WIDTH = 1280.0
 DEFAULT_IMAGE_HEIGHT = 720.0
 FEATURE_NAMES = [
@@ -53,7 +53,7 @@ def parse_args():
         default=None,
         help=(
             "Number of equal-time bins per repetition. "
-            "Defaults to 25 bins per effective target bit."
+            "Defaults to DEFAULT_BINS_PER_BIT bins per effective target bit."
         ),
     )
     parser.add_argument(
@@ -74,13 +74,16 @@ def resolve_num_bins(config, requested_num_bins):
     if requested_num_bins is not None:
         return requested_num_bins
 
+    return resolve_effective_target_bit_length(config) * DEFAULT_BINS_PER_BIT
+
+
+def resolve_effective_target_bit_length(config):
     data_config = config["data"]
     target_bit_length = int(data_config["target_bit_length"])
     if data_config.get("include_start_end_bits", False):
         target_bit_length += len(data_config.get("start_flag", ""))
         target_bit_length += len(data_config.get("end_flag", ""))
-
-    return target_bit_length * DEFAULT_BINS_PER_BIT
+    return target_bit_length
 
 
 def get_ordered_repetition_windows(chunk_info):
@@ -430,7 +433,16 @@ def build_processed_dataset(config, output_root, num_bins, limit_samples=None):
 def main():
     args = parse_args()
     config = load_config(args.config)
+    base_target_bit_length = int(config["data"]["target_bit_length"])
+    effective_target_bit_length = resolve_effective_target_bit_length(config)
     num_bins = resolve_num_bins(config, args.num_bins)
+    print(
+        "Ground truth config: "
+        f"base_target_bit_length={base_target_bit_length}, "
+        f"include_start_end_bits={config['data'].get('include_start_end_bits', False)}, "
+        f"effective_target_bit_length={effective_target_bit_length}, "
+        f"default_bins={effective_target_bit_length * DEFAULT_BINS_PER_BIT}"
+    )
     manifest_path, manifest = build_processed_dataset(
         config=config,
         output_root=args.output_root,

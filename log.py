@@ -25,6 +25,9 @@ def format_epoch_log(
     train_segment_metrics,
     val_metrics,
     task,
+    best_val_bit_accuracy,
+    best_epoch,
+    overfit_gap,
 ):
     epoch_log = (
         f"Epoch {epoch}: "
@@ -35,7 +38,10 @@ def format_epoch_log(
         f"val_loss = {val_metrics['loss']:.4f}, "
         f"val_bit_accuracy = {val_metrics['bit_accuracy']:.4f}, "
         f"val_exact_accuracy = {val_metrics['exact_accuracy']:.4f}, "
-        f"val_data_accuracy = {val_metrics['data_accuracy']:.4f}"
+        f"val_data_accuracy = {val_metrics['data_accuracy']:.4f}, "
+        f"best_val_bit_accuracy = {best_val_bit_accuracy:.4f}, "
+        f"best_epoch = {best_epoch}, "
+        f"overfit_gap = {overfit_gap:.4f}"
     )
     if task == "ctc":
         epoch_log += (

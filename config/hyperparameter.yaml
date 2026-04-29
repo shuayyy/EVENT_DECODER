@@ -5,6 +5,7 @@ data:
   include_start_end_bits: true
   start_flag: "1101"
   end_flag: "1011"
+  rep: true
   use_filtered: true
 
 
@@ -26,7 +27,8 @@ data:
     - seq_000067_datastring_67_chunk_002_sample_000289
 
 training:
-  task: fixed_bits # fixed_bits, ctc
+  task: ctc # fixed_bits, ctc
+  group_repetitions: true
   shuffle: true
   num_workers: 0
   log_dir: outputs/logs
@@ -62,15 +64,16 @@ models:
     grad_clip: 1.0
 
   transformer:
-    batch_size: 32
-    epochs: 100
+    batch_size: 8
+    epochs: 1000
     hidden_dim: 256
-    num_layers: 4
+    num_layers: 6
     nhead: 8
-    ff_dim: 1024
-    dropout: 0.05
+    ff_dim: 512
+    dropout: 0.0
     use_positional_encoding: true
     learning_rate: 0.0001
+    weight_decay: 0.0001
 
   mamba:
     batch_size: 32
