@@ -27,14 +27,14 @@ data:
     - seq_000067_datastring_67_chunk_002_sample_000289
 
 training:
-  task: ctc # fixed_bits, ctc
+  task: fixed_bits # fixed_bits, ctc
   group_repetitions: true
   shuffle: true
   num_workers: 0
   log_dir: outputs/logs
 
 ctc_decode:
-  method: beam # greedy, beam
+  method: greedy # greedy, beam
   beam_width: 25
   target_bit_length: 70
   length_penalty: 2.0
@@ -65,7 +65,7 @@ models:
 
   transformer:
     batch_size: 8
-    epochs: 1000
+    epochs: 100
     hidden_dim: 256
     num_layers: 6
     nhead: 8

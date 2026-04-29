@@ -160,15 +160,6 @@ class TransformerDecoder(nn.Module):
         )
 
         self.encoder = nn.Linear(input_dim, hidden_dim)
-        # A small temporal conv frontend helps the Transformer see short edge patterns
-        # such as rising/falling transitions across neighboring bins.
-        self.conv_frontend = nn.Sequential(
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-        )
-        self.conv_norm = nn.LayerNorm(hidden_dim)
         self.positional_encoding = (
             PositionalEncoding(hidden_dim, dropout=dropout, max_len=max_len)
             if use_positional_encoding
@@ -189,9 +180,6 @@ class TransformerDecoder(nn.Module):
 
     def forward(self, x, input_lengths=None):
         x = self.encoder(x)
-        residual = x
-        x = self.conv_frontend(x.transpose(1, 2)).transpose(1, 2)
-        x = self.conv_norm(residual + x)
         x = self.positional_encoding(x)
         x = self.temporal_model(x)
         x = pool_sequence_for_fixed_bits(
