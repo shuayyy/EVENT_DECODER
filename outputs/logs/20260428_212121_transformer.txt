@@ -1,0 +1,9 @@
+Run timestamp: 20260428_212121
+Using processed manifest: data/dataset_processed/manifest.json
+Task: fixed_bits
+Model type: transformer
+Device: cuda
+Model config: {'model_type': 'transformer', 'input_dim': 13, 'output_dim': 2, 'batch_size': 32, 'epochs': 100, 'hidden_dim': 256, 'num_layers': 4, 'nhead': 8, 'ff_dim': 1024, 'dropout': 0.05, 'use_positional_encoding': True, 'learning_rate': 0.0001}
+Ground truth config: base_target_bit_length=70, include_start_end_bits=True, effective_target_bit_length=78
+Split summary: train={sequences: 81, samples: 2981}, val={sequences: 10, samples: 176}
+Saved training log to: outputs/logs/20260428_212121_transformer.txt

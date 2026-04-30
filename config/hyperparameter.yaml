@@ -38,6 +38,13 @@ training:
     start_epoch: 1
     evaluate_with_ema: true
 
+recurrent_event:
+  prepared_manifest: data/recurrent_event_processed/manifest.json
+  output_dim: 71
+  continue_index: 70
+  stop_threshold: 1.0
+  stop_training_on_continue: true
+
 ctc_decode:
   method: greedy # greedy, beam
   beam_width: 25

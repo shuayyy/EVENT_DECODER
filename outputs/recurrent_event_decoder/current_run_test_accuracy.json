@@ -1,0 +1,27 @@
+{
+  "checkpoint": "outputs/recurrent_event_decoder/checkpoints/best.pt",
+  "renamed_checkpoint": "outputs/recurrent_event_decoder/checkpoints/current_run_best.pt",
+  "manifest": "data/recurrent_event_processed_stride10/manifest.json",
+  "epoch": 41,
+  "train": {
+    "bit_accuracy": 0.7070206099151107,
+    "exact_accuracy": 0.0,
+    "continue_accuracy": 0.0,
+    "premature_stop_rate": 1.0,
+    "stop_step_mae": 189.7359413202934,
+    "progress_mae": 1.1115506890350566,
+    "avg_stop_step": 4.6332518337408315,
+    "loss": 1.140280456298138
+  },
+  "test": {
+    "bit_accuracy": 0.7171428627438016,
+    "exact_accuracy": 0.0,
+    "continue_accuracy": 0.0,
+    "premature_stop_rate": 1.0,
+    "stop_step_mae": 192.82222222222222,
+    "progress_mae": 1.113731332619985,
+    "avg_stop_step": 6.711111111111111,
+    "loss": 1.1507400804095798
+  },
+  "average_bit_accuracy": 0.7120817363294561
+}

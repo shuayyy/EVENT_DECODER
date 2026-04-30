@@ -1,0 +1,286 @@
+{
+  "manifest": "data/recurrent_event_processed_stride10/manifest.json",
+  "epochs": [
+    50,
+    60,
+    70,
+    80,
+    90,
+    100
+  ],
+  "best_result": {
+    "run": "run_001",
+    "epoch": 80,
+    "score": 0.7171964152825653,
+    "params": {
+      "learning_rate": 0.0003,
+      "weight_decay": 0.0,
+      "dropout": 0.1,
+      "grad_clip": 1.0,
+      "encoder_stride": 4
+    },
+    "epoch_record": {
+      "epoch": 80,
+      "train": {
+        "bit_accuracy": 0.7105833048633958,
+        "exact_accuracy": 0.0,
+        "continue_accuracy": 0.0024449877750611247,
+        "premature_stop_rate": 0.17359413202933985,
+        "stop_step_mae": 8.25916870415648,
+        "progress_mae": 0.06927243290437171,
+        "avg_stop_step": 186.11002444987776,
+        "loss": 0.5316219239479755
+      },
+      "val": {
+        "bit_accuracy": 0.7238095257017347,
+        "exact_accuracy": 0.0,
+        "continue_accuracy": 0.0,
+        "premature_stop_rate": 0.26666666666666666,
+        "stop_step_mae": 21.866666666666667,
+        "progress_mae": 0.13946469757292007,
+        "avg_stop_step": 177.66666666666666,
+        "loss": 0.5568320439921485
+      },
+      "average_bit_accuracy": 0.7171964152825653
+    },
+    "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_080/latest.pt",
+    "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+    "reused_from_previous_epoch": true
+  },
+  "results": [
+    {
+      "run": "run_001",
+      "epoch": 50,
+      "score": 0.6875169829104912,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 50,
+        "train": {
+          "bit_accuracy": 0.7099545966733639,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0024449877750611247,
+          "premature_stop_rate": 0.18337408312958436,
+          "stop_step_mae": 12.667481662591687,
+          "progress_mae": 0.08094243912941669,
+          "avg_stop_step": 181.70171149144255,
+          "loss": 0.5387205005712206
+        },
+        "val": {
+          "bit_accuracy": 0.6650793691476186,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 1.0,
+          "stop_step_mae": 190.53333333333333,
+          "progress_mae": 1.2935109204716153,
+          "avg_stop_step": 9.0,
+          "loss": 1.3926240616374546
+        },
+        "average_bit_accuracy": 0.6875169829104912
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_050/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": false
+    },
+    {
+      "run": "run_001",
+      "epoch": 60,
+      "score": 0.7051946296927658,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 60,
+        "train": {
+          "bit_accuracy": 0.7088019585551143,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 0.17359413202933985,
+          "stop_step_mae": 10.638141809290953,
+          "progress_mae": 0.07721487146717995,
+          "avg_stop_step": 183.73105134474326,
+          "loss": 0.5378395972595821
+        },
+        "val": {
+          "bit_accuracy": 0.7015873008304172,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 1.0,
+          "stop_step_mae": 189.75555555555556,
+          "progress_mae": 1.6094781465000576,
+          "avg_stop_step": 9.777777777777779,
+          "loss": 1.6762579984135098
+        },
+        "average_bit_accuracy": 0.7051946296927658
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_060/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": true
+    },
+    {
+      "run": "run_001",
+      "epoch": 70,
+      "score": 0.7151597014703495,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 70,
+        "train": {
+          "bit_accuracy": 0.7087321026401007,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.004889975550122249,
+          "premature_stop_rate": 0.17359413202933985,
+          "stop_step_mae": 8.004889975550123,
+          "progress_mae": 0.057179446762523324,
+          "avg_stop_step": 186.3643031784841,
+          "loss": 0.5324038184796686
+        },
+        "val": {
+          "bit_accuracy": 0.7215873003005981,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.044444444444444446,
+          "premature_stop_rate": 0.9555555555555556,
+          "stop_step_mae": 100.55555555555556,
+          "progress_mae": 0.46690684027141993,
+          "avg_stop_step": 98.97777777777777,
+          "loss": 0.6622710174984402
+        },
+        "average_bit_accuracy": 0.7151597014703495
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_070/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": true
+    },
+    {
+      "run": "run_001",
+      "epoch": 80,
+      "score": 0.7171964152825653,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 80,
+        "train": {
+          "bit_accuracy": 0.7105833048633958,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0024449877750611247,
+          "premature_stop_rate": 0.17359413202933985,
+          "stop_step_mae": 8.25916870415648,
+          "progress_mae": 0.06927243290437171,
+          "avg_stop_step": 186.11002444987776,
+          "loss": 0.5316219239479755
+        },
+        "val": {
+          "bit_accuracy": 0.7238095257017347,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 0.26666666666666666,
+          "stop_step_mae": 21.866666666666667,
+          "progress_mae": 0.13946469757292007,
+          "avg_stop_step": 177.66666666666666,
+          "loss": 0.5568320439921485
+        },
+        "average_bit_accuracy": 0.7171964152825653
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_080/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": true
+    },
+    {
+      "run": "run_001",
+      "epoch": 90,
+      "score": 0.7109201723840761,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 90,
+        "train": {
+          "bit_accuracy": 0.7100943090863217,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0024449877750611247,
+          "premature_stop_rate": 0.15892420537897312,
+          "stop_step_mae": 9.039119804400977,
+          "progress_mae": 0.07421588547946771,
+          "avg_stop_step": 185.33007334963324,
+          "loss": 0.5360364930699681
+        },
+        "val": {
+          "bit_accuracy": 0.7117460356818305,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 1.0,
+          "stop_step_mae": 177.6,
+          "progress_mae": 0.9650855011410183,
+          "avg_stop_step": 21.933333333333334,
+          "loss": 1.0140826212035285
+        },
+        "average_bit_accuracy": 0.7109201723840761
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_090/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": true
+    },
+    {
+      "run": "run_001",
+      "epoch": 100,
+      "score": 0.7142014994403649,
+      "params": {
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "dropout": 0.1,
+        "grad_clip": 1.0,
+        "encoder_stride": 4
+      },
+      "epoch_record": {
+        "epoch": 100,
+        "train": {
+          "bit_accuracy": 0.7134823628626126,
+          "exact_accuracy": 0.0024449877750611247,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 0.16136919315403422,
+          "stop_step_mae": 9.32762836185819,
+          "progress_mae": 0.062307669072978945,
+          "avg_stop_step": 185.04156479217605,
+          "loss": 0.5269072158193822
+        },
+        "val": {
+          "bit_accuracy": 0.7149206360181173,
+          "exact_accuracy": 0.0,
+          "continue_accuracy": 0.0,
+          "premature_stop_rate": 1.0,
+          "stop_step_mae": 179.82222222222222,
+          "progress_mae": 0.9820026397705078,
+          "avg_stop_step": 19.711111111111112,
+          "loss": 1.0426242788632711
+        },
+        "average_bit_accuracy": 0.7142014994403649
+      },
+      "checkpoint": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/epoch_100/latest.pt",
+      "metrics": "outputs/recurrent_event_decoder/sweeps/sweep_20260429_070736/run_001/metrics.json",
+      "reused_from_previous_epoch": true
+    }
+  ]
+}
