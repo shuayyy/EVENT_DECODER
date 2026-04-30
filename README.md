@@ -19,7 +19,13 @@ data/
 - Build repetition data by running this command , it creates bins from the data:
 
 ```bash
-python scripts/process_repetition.py
+python event_transformer/process_repetition.py
+```
+
+- Train the transformer decoder with:
+
+```bash
+python event_transformer/train.py
 ```
 
 # Bin Features

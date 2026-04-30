@@ -59,22 +59,11 @@ split:
   val_ratio: 0.10
 
 model:
-  model_type: transformer # lstm, transformer, mamba
+  model_type: transformer
   input_dim: 13
   output_dim: 3
 
 models:
-  lstm:
-    batch_size: 32
-    epochs: 50
-    hidden_dim: 254
-    num_layers: 4
-    bidirectional: true
-    dropout: 0.0
-    learning_rate: 0.00005
-    weight_decay: 0.000
-    grad_clip: 1.0
-
   transformer:
     batch_size: 8
     epochs: 30
@@ -91,14 +80,3 @@ models:
       initial_lr: 0.00015
       switch_epoch: 20
       final_lr: 0.0001
-
-  mamba:
-    batch_size: 32
-    epochs: 1000
-    hidden_dim: 256
-    num_layers: 4
-    d_state: 64
-    d_conv: 16
-    expand: 2
-    dropout: 0.0
-    learning_rate: 0.0003
