@@ -32,6 +32,11 @@ training:
   shuffle: true
   num_workers: 0
   log_dir: outputs/logs
+  ema:
+    enabled: true
+    decay: 0.99
+    start_epoch: 1
+    evaluate_with_ema: true
 
 ctc_decode:
   method: greedy # greedy, beam
@@ -65,15 +70,20 @@ models:
 
   transformer:
     batch_size: 8
-    epochs: 100
+    epochs: 30
     hidden_dim: 256
-    num_layers: 6
+    num_layers: 4
     nhead: 8
     ff_dim: 512
     dropout: 0.0
     use_positional_encoding: true
     learning_rate: 0.0001
-    weight_decay: 0.0001
+    weight_decay: 0.0005
+    lr_schedule:
+      enabled: true
+      initial_lr: 0.00015
+      switch_epoch: 20
+      final_lr: 0.0001
 
   mamba:
     batch_size: 32

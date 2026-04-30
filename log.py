@@ -98,7 +98,10 @@ class LiveTrainingPlotter:
             axis.autoscale_view()
 
         self.axes[1].set_ylim(0.0, 1.0)
-        self.axes[2].set_xlim(1, max(self.epochs))
+        if len(self.epochs) == 1:
+            self.axes[2].set_xlim(0.5, 1.5)
+        else:
+            self.axes[2].set_xlim(1, max(self.epochs))
 
         self.figure.tight_layout()
         self.figure.canvas.draw_idle()

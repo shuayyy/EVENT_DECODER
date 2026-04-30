@@ -34,9 +34,58 @@ CONFIG_PATH = Path("config/hyperparameter.yaml")
 PAD_COUNT_BIT_LENGTH = 6
 
 
+class ExponentialMovingAverage:
+    def __init__(self, model, decay):
+        self.decay = float(decay)
+        self.shadow_state = {
+            name: tensor.detach().clone()
+            for name, tensor in model.state_dict().items()
+        }
+
+    def update(self, model):
+        for name, tensor in model.state_dict().items():
+            shadow_tensor = self.shadow_state[name]
+            model_tensor = tensor.detach()
+            if torch.is_floating_point(shadow_tensor):
+                shadow_tensor.mul_(self.decay).add_(
+                    model_tensor,
+                    alpha=1.0 - self.decay,
+                )
+            else:
+                shadow_tensor.copy_(model_tensor)
+
+    def apply_to(self, model):
+        backup_state = {
+            name: tensor.detach().clone()
+            for name, tensor in model.state_dict().items()
+        }
+        model.load_state_dict(self.shadow_state, strict=True)
+        return backup_state
+
+    @staticmethod
+    def restore(model, backup_state):
+        model.load_state_dict(backup_state, strict=True)
+
+
 def load_config():
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def resolve_epoch_learning_rate(epoch, base_learning_rate, lr_schedule_config):
+    schedule_config = dict(lr_schedule_config or {})
+    if not schedule_config.get("enabled", False):
+        return float(base_learning_rate)
+
+    initial_lr = float(schedule_config.get("initial_lr", base_learning_rate))
+    final_lr = float(schedule_config.get("final_lr", base_learning_rate))
+    switch_epoch = int(schedule_config.get("switch_epoch", 0))
+
+    if switch_epoch <= 0:
+        return final_lr
+    if epoch <= switch_epoch:
+        return initial_lr
+    return final_lr
 
 
 def select_training_inputs(inputs):
@@ -298,6 +347,91 @@ def save_per_bit_accuracy_history_plot(per_bit_accuracy_history, output_path):
     plt.title("Per-bit validation accuracy across training")
     plt.xticks(bit_tick_positions)
     plt.yticks(epoch_tick_positions, epoch_tick_labels)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def save_metric_curve_plot(
+    epochs,
+    train_values,
+    val_values,
+    output_path,
+    *,
+    title,
+    ylabel,
+    train_label,
+    val_label,
+    best_values=None,
+    best_label=None,
+    reference_epochs=None,
+    tight_ylim=False,
+):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not epochs:
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        epochs,
+        train_values,
+        label=train_label,
+        color="#1f77b4",
+        linewidth=2.25,
+        marker="o",
+        markersize=3,
+    )
+    plt.plot(
+        epochs,
+        val_values,
+        label=val_label,
+        color="#d62728",
+        linewidth=2.25,
+        marker="o",
+        markersize=3,
+    )
+    if best_values is not None and best_label is not None:
+        plt.plot(
+            epochs,
+            best_values,
+            label=best_label,
+            color="#9467bd",
+            linestyle="--",
+            linewidth=1.75,
+        )
+    for reference_epoch in reference_epochs or []:
+        epoch_value = int(reference_epoch["epoch"])
+        line_style = reference_epoch.get("linestyle", "--")
+        color = reference_epoch.get("color", "gray")
+        label = reference_epoch.get("label")
+        plt.axvline(
+            epoch_value,
+            color=color,
+            linestyle=line_style,
+            linewidth=1,
+            label=label,
+        )
+    plt.xlabel("Epoch")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    if tight_ylim:
+        all_values = list(train_values) + list(val_values)
+        if best_values is not None:
+            all_values += list(best_values)
+        min_value = min(all_values)
+        max_value = max(all_values)
+        padding = max(0.005, (max_value - min_value) * 0.12)
+        plt.ylim(min_value - padding, max_value + padding)
+    elif "accuracy" in ylabel.lower():
+        plt.ylim(0.0, 1.0)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -617,6 +751,13 @@ def train():
         bool(config["training"].get("group_repetitions", False))
         and task == "fixed_bits"
     )
+    ema_config = dict(config["training"].get("ema", {}))
+    ema_enabled = bool(ema_config.get("enabled", False))
+    ema_decay = float(ema_config.get("decay", 0.995))
+    ema_start_epoch = int(ema_config.get("start_epoch", 1))
+    evaluate_with_ema = ema_enabled and bool(
+        ema_config.get("evaluate_with_ema", True)
+    )
     model_type, model_config = resolve_model_config(config)
     ctc_decode_config = dict(config.get("ctc_decode", {}))
     base_target_bit_length = int(config["data"]["target_bit_length"])
@@ -668,6 +809,12 @@ def train():
     live_plotter = LiveTrainingPlotter(live_plot_path)
     log = logger.log
     per_bit_accuracy_history = []
+    epoch_history = []
+    train_loss_history = []
+    val_loss_history = []
+    train_bit_accuracy_history = []
+    val_bit_accuracy_history = []
+    best_val_bit_accuracy_history = []
 
     try:
         manifest_path = Path(
@@ -744,11 +891,19 @@ def train():
             target_bit_length=target_bit_length,
         ).to(device)
 
+        lr_schedule_config = dict(model_config.get("lr_schedule", {}))
+        initial_optimizer_lr = resolve_epoch_learning_rate(
+            epoch=1,
+            base_learning_rate=model_config["learning_rate"],
+            lr_schedule_config=lr_schedule_config,
+        )
+
         optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=model_config["learning_rate"],
+            lr=initial_optimizer_lr,
             weight_decay=model_config.get("weight_decay", 0.0),
         )
+        ema = ExponentialMovingAverage(model, ema_decay) if ema_enabled else None
 
         log(f"Run timestamp: {run_timestamp}")
         log(f"Using processed manifest: {manifest_path}")
@@ -758,6 +913,21 @@ def train():
         log(f"Model type: {model_type}")
         log(f"Device: {device}")
         log(f"Model config: {model_config}")
+        if lr_schedule_config.get("enabled", False):
+            log(
+                "LR schedule: "
+                f"initial_lr={float(lr_schedule_config.get('initial_lr', model_config['learning_rate']))}, "
+                f"switch_epoch={int(lr_schedule_config.get('switch_epoch', 0))}, "
+                f"final_lr={float(lr_schedule_config.get('final_lr', model_config['learning_rate']))}"
+            )
+        if ema_enabled:
+            log(
+                "EMA config: "
+                f"enabled={ema_enabled}, "
+                f"decay={ema_decay}, "
+                f"start_epoch={ema_start_epoch}, "
+                f"evaluate_with_ema={evaluate_with_ema}"
+            )
         log(
             "Ground truth config: "
             f"base_target_bit_length={base_target_bit_length}, "
@@ -781,6 +951,14 @@ def train():
         best_epoch = 0
 
         for epoch in range(model_config["epochs"]):
+            current_learning_rate = resolve_epoch_learning_rate(
+                epoch=epoch + 1,
+                base_learning_rate=model_config["learning_rate"],
+                lr_schedule_config=lr_schedule_config,
+            )
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_learning_rate
+
             model.train()
             total_loss = 0.0
             exact_matches = 0
@@ -841,6 +1019,8 @@ def train():
                 if grad_clip is not None:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
+                if ema is not None and (epoch + 1) >= ema_start_epoch:
+                    ema.update(model)
 
                 total_loss += loss.item()
                 if task == "ctc":
@@ -888,23 +1068,30 @@ def train():
             train_segment_metrics = finalize_segment_metric_accuracies(
                 train_segment_metric_counts
             )
-            val_metrics = evaluate(
-                model,
-                val_loader,
-                criterion,
-                device,
-                task,
-                target_bit_length,
-                base_target_bit_length,
-                include_start_end_bits,
-                start_flag,
-                end_flag,
-                tokenizer=tokenizer if task == "ctc" else None,
-                debug_first_batch=debug_first_val_batch,
-                debug_logger=log,
-                ctc_decode_config=ctc_decode_config if task == "ctc" else None,
-                group_repetitions=group_repetitions,
-            )
+            ema_backup_state = None
+            if evaluate_with_ema:
+                ema_backup_state = ema.apply_to(model)
+            try:
+                val_metrics = evaluate(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    task,
+                    target_bit_length,
+                    base_target_bit_length,
+                    include_start_end_bits,
+                    start_flag,
+                    end_flag,
+                    tokenizer=tokenizer if task == "ctc" else None,
+                    debug_first_batch=debug_first_val_batch,
+                    debug_logger=log,
+                    ctc_decode_config=ctc_decode_config if task == "ctc" else None,
+                    group_repetitions=group_repetitions,
+                )
+            finally:
+                if ema_backup_state is not None:
+                    ExponentialMovingAverage.restore(model, ema_backup_state)
             if task == "fixed_bits" and "per_bit_accuracy" in val_metrics:
                 per_bit_accuracy_history.append(val_metrics["per_bit_accuracy"])
 
@@ -927,6 +1114,12 @@ def train():
                 overfit_gap=overfit_gap,
             )
             log(epoch_log)
+            epoch_history.append(epoch + 1)
+            train_loss_history.append(train_loss)
+            val_loss_history.append(val_metrics["loss"])
+            train_bit_accuracy_history.append(train_bit_accuracy)
+            val_bit_accuracy_history.append(val_metrics["bit_accuracy"])
+            best_val_bit_accuracy_history.append(best_val_bit_accuracy)
             live_plotter.update(
                 epoch=epoch + 1,
                 train_loss=train_loss,
@@ -948,13 +1141,20 @@ def train():
                     target_bit_length,
                     group_repetitions=group_repetitions,
                 )
-                val_diag = fixed_bits_error_report(
-                    model,
-                    val_loader,
-                    device,
-                    target_bit_length,
-                    group_repetitions=group_repetitions,
-                )
+                ema_backup_state = None
+                if evaluate_with_ema:
+                    ema_backup_state = ema.apply_to(model)
+                try:
+                    val_diag = fixed_bits_error_report(
+                        model,
+                        val_loader,
+                        device,
+                        target_bit_length,
+                        group_repetitions=group_repetitions,
+                    )
+                finally:
+                    if ema_backup_state is not None:
+                        ExponentialMovingAverage.restore(model, ema_backup_state)
                 log(
                     f"Fixed-bit diagnostics epoch {epoch + 1}: "
                     f"train_zero_error={train_diag['zero_error']:.4f}, "
@@ -980,6 +1180,66 @@ def train():
             logger.log(f"Saved live training plot to: {live_plot_path}")
         else:
             logger.log("Live training plot was disabled because matplotlib could not be initialized.")
+        if epoch_history:
+            plot_dir = Path("outputs/training_curves")
+            accuracy_plot_path = plot_dir / f"{run_timestamp}_{model_type}_accuracy.png"
+            loss_plot_path = plot_dir / f"{run_timestamp}_{model_type}_loss.png"
+            reference_epochs = [
+                {
+                    "epoch": 15,
+                    "label": "Epoch 15",
+                    "linestyle": "--",
+                    "color": "gray",
+                }
+            ]
+            if lr_schedule_config.get("enabled", False):
+                reference_epochs.append(
+                    {
+                        "epoch": int(lr_schedule_config.get("switch_epoch", 0)),
+                        "label": "LR switch",
+                        "linestyle": ":",
+                        "color": "black",
+                    }
+                )
+            val_accuracy_label = (
+                "ema_val_bit_accuracy"
+                if evaluate_with_ema
+                else "val_bit_accuracy"
+            )
+            val_loss_label = "ema_val_loss" if evaluate_with_ema else "val_loss"
+            save_metric_curve_plot(
+                epoch_history,
+                train_bit_accuracy_history,
+                val_bit_accuracy_history,
+                accuracy_plot_path,
+                title="Training and Validation Bit Accuracy",
+                ylabel="Bit Accuracy",
+                train_label="Train accuracy",
+                val_label=(
+                    "EMA validation accuracy"
+                    if evaluate_with_ema
+                    else "Validation accuracy"
+                ),
+                reference_epochs=reference_epochs,
+                tight_ylim=True,
+            )
+            save_metric_curve_plot(
+                epoch_history,
+                train_loss_history,
+                val_loss_history,
+                loss_plot_path,
+                title="Training vs Validation Loss",
+                ylabel="Loss",
+                train_label="Train loss",
+                val_label=(
+                    "EMA validation loss"
+                    if evaluate_with_ema
+                    else "Validation loss"
+                ),
+                reference_epochs=reference_epochs,
+            )
+            logger.log(f"Saved accuracy plot: {accuracy_plot_path}")
+            logger.log(f"Saved loss plot: {loss_plot_path}")
         if task == "fixed_bits" and per_bit_accuracy_history:
             plot_path = (
                 Path("outputs/per_bit_accuracy")
