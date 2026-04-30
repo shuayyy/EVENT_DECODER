@@ -26,7 +26,7 @@ from losses.fixed_bits import (
     aggregate_repetition_log_probs,
     grouped_fixed_bits_loss,
 )
-from model.model import LSTMdecoder, MambaDecoder, TransformerDecoder
+from model.model import TransformerDecoder
 from log import LiveTrainingPlotter, TrainingLogger, format_epoch_log
 
 
@@ -100,53 +100,21 @@ def resolve_model_config(config):
 
 
 def build_model(model_type, model_config, output_mode="ctc", target_bit_length=70):
-    if model_type == "lstm":
-        return LSTMdecoder(
-            input_dim=model_config["input_dim"],
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["output_dim"],
-            num_layers=model_config.get("num_layers", 1),
-            bidirectional=model_config.get("bidirectional", False),
-            dropout=model_config.get("dropout", 0.0),
-            output_mode=output_mode,
-            target_bit_length=target_bit_length,
-        )
-    if model_type == "transformer":
-        return TransformerDecoder(
-            input_dim=model_config["input_dim"],
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["output_dim"],
-            num_layers=model_config.get("num_layers", 1),
-            nhead=model_config.get("nhead", 4),
-            ff_dim=model_config.get("ff_dim"),
-            dropout=model_config.get("dropout", 0.0),
-            use_positional_encoding=model_config.get("use_positional_encoding", True),
-            max_len=model_config.get("max_len", 5000),
-            output_mode=output_mode,
-            target_bit_length=target_bit_length,
-        )
-    if model_type == "mamba":
-        return MambaDecoder(
-            input_dim=model_config["input_dim"],
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["output_dim"],
-            num_layers=model_config.get("num_layers", 1),
-            d_state=model_config.get("d_state", 16),
-            d_conv=model_config.get("d_conv", 4),
-            expand=model_config.get("expand", 2),
-            dropout=model_config.get("dropout", 0.0),
-            output_mode=output_mode,
-            target_bit_length=target_bit_length,
-        )
-
-    else:
+    if model_type != "transformer":
         raise ValueError(f"Unsupported model_type: {model_type}")
-
-
-def validate_model_runtime(model_config, device):
-    model_type = model_config["model_type"].strip().lower()
-    if model_type == "mamba" and device.type != "cuda":
-        raise RuntimeError("Mamba does not work on CPU. Use CUDA or choose a different model_type.")
+    return TransformerDecoder(
+        input_dim=model_config["input_dim"],
+        hidden_dim=model_config["hidden_dim"],
+        output_dim=model_config["output_dim"],
+        num_layers=model_config.get("num_layers", 1),
+        nhead=model_config.get("nhead", 4),
+        ff_dim=model_config.get("ff_dim"),
+        dropout=model_config.get("dropout", 0.0),
+        use_positional_encoding=model_config.get("use_positional_encoding", True),
+        max_len=model_config.get("max_len", 5000),
+        output_mode=output_mode,
+        target_bit_length=target_bit_length,
+    )
 
 
 def split_sequences(samples, split_config):
@@ -799,7 +767,6 @@ def train():
         raise ValueError(f"Unsupported training task: {task}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    validate_model_runtime(model_config, device)
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = Path(config["training"].get("log_dir", "outputs/logs"))
     log_path = log_dir / f"{run_timestamp}_{model_type}.txt"
